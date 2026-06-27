@@ -628,7 +628,7 @@ def scan_arbitrage():
             """Get Orca pool price via GeckoTerminal API"""
             try:
                 orca_pools = {
-                    "SOL":  "HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ",
+                    "SOL":  "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
                     "ETH":  "FpCMFDFGYotvufJ7HrFHsWEiiQCGbkLCtwHiDnh7o28Q",
                     "JUP":  "DVa7Qmb5ct9RCpaU7UTpSaf3GVMYz17vNVU67JrdkNsV",
                     "BONK": "8QaXeHBrShJTdtN1rWCccBxpSVvKksQ2PCu5nufb2zbk",
@@ -658,10 +658,10 @@ def scan_arbitrage():
             try:
                 # GeckoTerminal pool IDs for top Meteora pools
                 meteora_pools = {
-                    "SOL":  "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
+                    "SOL":  "BSo8Z91m4jr7RxNB6ye8cBnLBGFBoBnj4rE76DhPgMvr",
                     "ETH":  "HxVkHFNMEMBPgCCFrRTGJYVLCjBFnrNNNjEjHcKNwMC",
                     "JUP":  "FoSDw2L5DmTuQTFe55gWPDXf88euaxAEKFre74CnvQbX",
-                    "BONK": "DVa7Qmb5ct9RCpaU7UTpSaf3GVMYz17vNVU67JrdkNsV",
+                    "BONK": "DLarBEnCMBKjcj7mUMChbBEyYHB6jAExSnFjEcBpBFhb",
                 }
                 pool_id = meteora_pools.get(token_symbol,"")
                 if not pool_id: return 0.0
