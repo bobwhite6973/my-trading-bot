@@ -1,0 +1,18 @@
+{
+  "project": "My Trading Bot",
+  "customer": "Customer",
+  "chain": "Ethereum",
+  "bot_type": "Sniper Bot",
+  "stop_loss_pct": "",
+  "take_profit_pct": "",
+  "slippage_pct": "",
+  "max_position_usd": "",
+  "max_daily_loss_usd": "",
+  "tg_bot_token": "",
+  "tg_chat_id": "",
+  "source_wallet": "",
+  "copy_ratio": "",
+  "tracked_wallets": "",
+  "min_liquidity_usd": "",
+  "min_holders": ""
+}
