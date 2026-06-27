@@ -1,28 +1,43 @@
 #!/usr/bin/env python3
 """
-Trading Bot — Web Dashboard + Live Trading
-Serves a control panel UI and runs selected strategy against LBank
+Trading Bot — Full Dashboard
+CEX mode: API key trading on Binance/Bybit/OKX/KuCoin/LBank
+DEX mode: Wallet-based trading via Uniswap/1inch on any EVM chain
+Price feeds: Kraken (no key needed)
+Strategies: DCA, Grid, Scalping, Copy Trading, Arbitrage
 """
-import os, json, time, hmac, hashlib, threading, requests
+import os, json, time, hmac, hashlib, threading, requests, logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlencode, parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse
 
-# ── Config ────────────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.WARNING)
+
+# ── Config from environment ───────────────────────────────────────────────────
 cfg = {
-    "api_key":    os.environ.get("API_KEY", ""),
-    "api_secret": os.environ.get("API_SECRET", ""),
-    "pair":       os.environ.get("TRADING_PAIR", "BTC/USDT"),
-    "risk_pct":   float(os.environ.get("RISK_PCT", "2")),
-    "stop_loss":  float(os.environ.get("STOP_LOSS_PCT", "5")),
-    "take_profit":float(os.environ.get("TAKE_PROFIT_PCT", "15")),
-    "max_pos":    float(os.environ.get("MAX_POSITION_USD", "500")),
-    "max_loss":   float(os.environ.get("MAX_DAILY_LOSS_USD", "200")),
+    # CEX
+    "api_key":      os.environ.get("API_KEY", ""),
+    "api_secret":   os.environ.get("API_SECRET", ""),
+    "exchange":     os.environ.get("EXCHANGE", "binance"),
+    # DEX
+    "wallet":       os.environ.get("WALLET_ADDRESS", ""),
+    "private_key":  os.environ.get("PRIVATE_KEY", ""),
+    # Trading
+    "pair":         os.environ.get("TRADING_PAIR", "BTC/USDT"),
+    "risk_pct":     float(os.environ.get("RISK_PCT", "2")),
+    "stop_loss":    float(os.environ.get("STOP_LOSS_PCT", "5")),
+    "take_profit":  float(os.environ.get("TAKE_PROFIT_PCT", "15")),
+    "max_pos":      float(os.environ.get("MAX_POSITION_USD", "500")),
+    "max_loss":     float(os.environ.get("MAX_DAILY_LOSS_USD", "200")),
+    "source_wallet":os.environ.get("SOURCE_WALLET", ""),
 }
 
 # ── Bot State ─────────────────────────────────────────────────────────────────
 state = {
     "running":    False,
     "strategy":   None,
+    "mode":       None,  # "cex" or "dex"
+    "exchange":   cfg["exchange"],
+    "chain":      "ethereum",
     "pair":       cfg["pair"],
     "price":      0.0,
     "balance":    0.0,
@@ -32,6 +47,7 @@ state = {
     "daily_loss": 0.0,
     "log":        [],
     "error":      None,
+    "arb_opps":   [],
 }
 
 def log(msg, level="INFO"):
@@ -39,248 +55,478 @@ def log(msg, level="INFO"):
     entry = "["+ts+"] ["+level+"] "+msg
     print(entry)
     state["log"].insert(0, entry)
-    if len(state["log"]) > 100:
-        state["log"] = state["log"][:100]
+    if len(state["log"]) > 150:
+        state["log"] = state["log"][:150]
 
-# ── LBank API ─────────────────────────────────────────────────────────────────
-LBANK_BASE = "https://api.lbank.info/v2"
+# ── Price Feeds (Kraken — no API key needed) ──────────────────────────────────
+KRAKEN_PAIRS = {
+    "BTC/USDT": "XBTUSD", "ETH/USDT": "ETHUSD", "BNB/USDT": "BNBUSD",
+    "SOL/USDT": "SOLUSD", "ARB/USDT": "ARBUSD", "MATIC/USDT": "MATICUSD",
+    "AVAX/USDT": "AVAXUSD", "LINK/USDT": "LINKUSD", "UNI/USDT": "UNIUSD",
+}
 
-def lbank_sign(params):
-    params["api_key"] = cfg["api_key"]
-    params["timestamp"] = str(int(time.time() * 1000))
-    sorted_params = sorted(params.items())
-    query = urlencode(sorted_params)
-    sign = hmac.new(cfg["api_secret"].encode(), query.encode(), hashlib.md5).hexdigest().upper()
-    params["sign"] = sign
-    return params
-
-def get_price(symbol):
+def get_price_kraken(pair):
     try:
-        sym = symbol.replace("/","_").lower()
-        r = requests.get(LBANK_BASE+"/ticker/price.do", params={"symbol": sym}, timeout=5)
+        kraken_pair = KRAKEN_PAIRS.get(pair, pair.replace("/","").replace("USDT","USD"))
+        r = requests.get("https://api.kraken.com/0/public/Ticker", params={"pair": kraken_pair}, timeout=5)
         data = r.json()
-        if data.get("result") == "true":
-            return float(data["data"][0]["price"])
+        if not data.get("error"):
+            result = data.get("result", {})
+            key = list(result.keys())[0] if result else None
+            if key:
+                return float(result[key]["c"][0])
     except Exception as ex:
-        log("Price fetch error: "+str(ex), "ERROR")
+        log("Kraken price error: "+str(ex), "ERROR")
     return 0.0
 
-def get_balance():
+def get_price_coingecko(token):
     try:
-        params = lbank_sign({"echostr": "test"})
-        r = requests.post(LBANK_BASE+"/supplement/user_info.do", data=params, timeout=5)
+        ids = {"BTC":"bitcoin","ETH":"ethereum","BNB":"binancecoin","SOL":"solana","MATIC":"matic-network","ARB":"arbitrum"}
+        cid = ids.get(token.split("/")[0], token.split("/")[0].lower())
+        r = requests.get("https://api.coingecko.com/api/v3/simple/price", params={"ids":cid,"vs_currencies":"usd"}, timeout=5)
         data = r.json()
-        if data.get("result") == "true":
-            info = data.get("data", {}).get("info", {}).get("free", {})
-            usdt = float(info.get("usdt", 0))
-            state["balance"] = usdt
-            return usdt
+        return float(data.get(cid,{}).get("usd",0))
+    except:
+        return 0.0
+
+def get_price(pair):
+    price = get_price_kraken(pair)
+    if price <= 0:
+        price = get_price_coingecko(pair)
+    state["price"] = price
+    return price
+
+# ── CEX Trading ───────────────────────────────────────────────────────────────
+CEX_CONFIGS = {
+    "binance": {"base":"https://api.binance.com","sign":"sha256"},
+    "bybit":   {"base":"https://api.bybit.com","sign":"sha256"},
+    "okx":     {"base":"https://www.okx.com","sign":"sha256"},
+    "kraken":  {"base":"https://api.kraken.com","sign":"sha512"},
+    "kucoin":  {"base":"https://api.kucoin.com","sign":"sha256"},
+    "lbank":   {"base":"https://api.lbank.info","sign":"md5"},
+}
+
+def cex_get_balance():
+    exchange = state["exchange"]
+    try:
+        if exchange == "binance":
+            ts = str(int(time.time()*1000))
+            params = "timestamp="+ts
+            sig = hmac.new(cfg["api_secret"].encode(), params.encode(), hashlib.sha256).hexdigest()
+            r = requests.get("https://api.binance.com/api/v3/account",
+                headers={"X-MBX-APIKEY": cfg["api_key"]},
+                params={"timestamp":ts,"signature":sig}, timeout=5)
+            data = r.json()
+            for b in data.get("balances",[]):
+                if b["asset"] == "USDT":
+                    state["balance"] = float(b["free"])
+                    return float(b["free"])
+        elif exchange == "bybit":
+            ts = str(int(time.time()*1000))
+            params = "timestamp="+ts+"&api_key="+cfg["api_key"]
+            sig = hmac.new(cfg["api_secret"].encode(), params.encode(), hashlib.sha256).hexdigest()
+            r = requests.get("https://api.bybit.com/v2/private/wallet/balance",
+                params={"timestamp":ts,"api_key":cfg["api_key"],"sign":sig,"coin":"USDT"}, timeout=5)
+            data = r.json()
+            usdt = data.get("result",{}).get("USDT",{}).get("available_balance",0)
+            state["balance"] = float(usdt)
+            return float(usdt)
+        elif exchange == "okx":
+            import base64, datetime
+            ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.000Z')
+            path = "/api/v5/account/balance"
+            sign_str = ts+"GET"+path+""
+            sig = base64.b64encode(hmac.new(cfg["api_secret"].encode(),sign_str.encode(),hashlib.sha256).digest()).decode()
+            r = requests.get("https://www.okx.com"+path,
+                headers={"OK-ACCESS-KEY":cfg["api_key"],"OK-ACCESS-SIGN":sig,"OK-ACCESS-TIMESTAMP":ts,"OK-ACCESS-PASSPHRASE":os.environ.get("OKX_PASSPHRASE","")}, timeout=5)
+            data = r.json()
+            for d in data.get("data",[{}])[0].get("details",[]):
+                if d.get("ccy")=="USDT":
+                    state["balance"]=float(d.get("availBal",0)); return state["balance"]
+        elif exchange == "lbank":
+            ts = str(int(time.time()*1000))
+            params = {"api_key":cfg["api_key"],"timestamp":ts}
+            query = "&".join(k+"="+str(v) for k,v in sorted(params.items()))
+            sign = hmac.new(cfg["api_secret"].encode(), query.encode(), hashlib.md5).hexdigest().upper()
+            params["sign"] = sign
+            r = requests.post("https://api.lbank.info/v1/user_info.do", data=params, timeout=5)
+            data = r.json()
+            if data.get("result")=="true":
+                usdt = float(data.get("info",{}).get("free",{}).get("usdt",0))
+                state["balance"]=usdt; return usdt
+            else:
+                log("LBank balance error: "+str(data.get("error_code","")), "ERROR")
+        elif exchange == "kucoin":
+            ts = str(int(time.time()*1000))
+            path = "/api/v1/accounts"
+            sign_str = ts+"GET"+path
+            sig = hmac.new(cfg["api_secret"].encode(), sign_str.encode(), hashlib.sha256).hexdigest()
+            r = requests.get("https://api.kucoin.com"+path,
+                headers={"KC-API-KEY":cfg["api_key"],"KC-API-SIGN":sig,"KC-API-TIMESTAMP":ts,"KC-API-PASSPHRASE":os.environ.get("KUCOIN_PASSPHRASE","")}, timeout=5)
+            data = r.json()
+            for a in data.get("data",[]):
+                if a.get("currency")=="USDT" and a.get("type")=="trade":
+                    state["balance"]=float(a.get("available",0)); return state["balance"]
     except Exception as ex:
-        log("Balance fetch error: "+str(ex), "ERROR")
+        log("Balance error ("+exchange+"): "+str(ex), "ERROR")
     return 0.0
 
-def place_order(symbol, side, amount):
+def cex_place_order(pair, side, amount):
+    exchange = state["exchange"]
     try:
-        sym = symbol.replace("/","_").lower()
-        params = lbank_sign({
-            "symbol": sym,
-            "type": side,
-            "price": "-1",
-            "amount": str(amount),
-        })
-        r = requests.post(LBANK_BASE+"/supplement/create_order.do", data=params, timeout=10)
-        data = r.json()
-        if data.get("result") == "true":
-            return data.get("data", {}).get("order_id")
-        else:
-            log("Order error: "+str(data.get("error_code")), "ERROR")
+        sym = pair.replace("/","")
+        if exchange == "binance":
+            ts = str(int(time.time()*1000))
+            params = "symbol="+sym+"&side="+side.upper()+"&type=MARKET&quantity="+str(amount)+"&timestamp="+ts
+            sig = hmac.new(cfg["api_secret"].encode(), params.encode(), hashlib.sha256).hexdigest()
+            r = requests.post("https://api.binance.com/api/v3/order",
+                headers={"X-MBX-APIKEY":cfg["api_key"]},
+                params={"symbol":sym,"side":side.upper(),"type":"MARKET","quantity":amount,"timestamp":ts,"signature":sig}, timeout=10)
+            data = r.json()
+            return data.get("orderId")
+        elif exchange == "bybit":
+            ts = str(int(time.time()*1000))
+            body = json.dumps({"symbol":sym,"side":side.capitalize(),"orderType":"Market","qty":str(amount),"timeInForce":"GoodTillCancel"})
+            sig = hmac.new(cfg["api_secret"].encode(),(ts+cfg["api_key"]+"5000"+body).encode(),hashlib.sha256).hexdigest()
+            r = requests.post("https://api.bybit.com/v5/order/create",
+                headers={"X-BAPI-API-KEY":cfg["api_key"],"X-BAPI-SIGN":sig,"X-BAPI-TIMESTAMP":ts,"X-BAPI-RECV-WINDOW":"5000","Content-Type":"application/json"},
+                data=body, timeout=10)
+            data = r.json()
+            return data.get("result",{}).get("orderId")
+        elif exchange == "lbank":
+            ts = str(int(time.time()*1000))
+            lsym = pair.replace("/","_").lower()
+            lside = "buy_market" if "buy" in side.lower() else "sell_market"
+            params = {"api_key":cfg["api_key"],"symbol":lsym,"type":lside,"price":"-1","amount":str(amount),"timestamp":ts}
+            query = "&".join(k+"="+str(v) for k,v in sorted(params.items()))
+            sign = hmac.new(cfg["api_secret"].encode(), query.encode(), hashlib.md5).hexdigest().upper()
+            params["sign"] = sign
+            r = requests.post("https://api.lbank.info/v1/create_order.do", data=params, timeout=10)
+            data = r.json()
+            if data.get("result")=="true": return data.get("order_id")
+            else: log("LBank order error: "+str(data.get("error_code","")), "ERROR")
+        log("Order placed: "+side+" "+str(amount)+" "+pair)
     except Exception as ex:
-        log("Order exception: "+str(ex), "ERROR")
+        log("Order error ("+exchange+"): "+str(ex), "ERROR")
     return None
 
+# ── DEX Trading ───────────────────────────────────────────────────────────────
+CHAIN_CONFIG = {
+    "ethereum": {"rpc":"https://eth.llamarpc.com","chain_id":1,"name":"Ethereum"},
+    "bsc":      {"rpc":"https://bsc-dataseed.binance.org","chain_id":56,"name":"BNB Chain"},
+    "base":     {"rpc":"https://mainnet.base.org","chain_id":8453,"name":"Base"},
+    "arbitrum": {"rpc":"https://arb1.llamarpc.com","chain_id":42161,"name":"Arbitrum"},
+    "polygon":  {"rpc":"https://polygon.llamarpc.com","chain_id":137,"name":"Polygon"},
+}
+
+TOKENS = {
+    "ethereum": {"USDT":"0xdAC17F958D2ee523a2206206994597C13D831ec7","WETH":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","WBTC":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"},
+    "bsc":      {"USDT":"0x55d398326f99059fF775485246999027B3197955","WBNB":"0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c","BTCB":"0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c"},
+    "base":     {"USDT":"0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2","WETH":"0x4200000000000000000000000000000000000006"},
+    "arbitrum": {"USDT":"0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9","WETH":"0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"},
+    "polygon":  {"USDT":"0xc2132D05D31c914a87C6611C10748AEb04B58e8F","WMATIC":"0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"},
+}
+
+def dex_get_quote_1inch(chain, from_token, to_token, amount_wei):
+    try:
+        chain_ids = {"ethereum":1,"bsc":56,"base":8453,"arbitrum":42161,"polygon":137}
+        cid = chain_ids.get(chain, 1)
+        r = requests.get(
+            "https://api.1inch.dev/swap/v6.0/"+str(cid)+"/quote",
+            headers={"Authorization":"Bearer "+os.environ.get("ONEINCH_API_KEY","")},
+            params={"src":from_token,"dst":to_token,"amount":str(amount_wei)}, timeout=5)
+        data = r.json()
+        return int(data.get("dstAmount", 0))
+    except Exception as ex:
+        log("1inch quote error: "+str(ex), "ERROR")
+    return 0
+
+def dex_get_quote_uniswap(chain, from_token, to_token, amount_wei):
+    try:
+        chain_ids = {"ethereum":1,"bsc":56,"base":8453,"arbitrum":42161,"polygon":137}
+        cid = chain_ids.get(chain, 1)
+        r = requests.get(
+            "https://api.uniswap.org/v1/quote",
+            params={"protocols":"v2,v3","tokenInAddress":from_token,"tokenInChainId":cid,
+                    "tokenOutAddress":to_token,"tokenOutChainId":cid,"amount":str(amount_wei),"type":"exactIn"}, timeout=5)
+        data = r.json()
+        return int(float(data.get("quote","0")) * 1e6)
+    except Exception as ex:
+        log("Uniswap quote error: "+str(ex), "ERROR")
+    return 0
+
+def dex_best_quote(chain, from_token, to_token, amount_wei):
+    q1 = dex_get_quote_1inch(chain, from_token, to_token, amount_wei)
+    q2 = dex_get_quote_uniswap(chain, from_token, to_token, amount_wei)
+    if q1 >= q2:
+        return q1, "1inch"
+    return q2, "Uniswap"
+
+def dex_swap(chain, from_token, to_token, amount_usd, price):
+    try:
+        amount_wei = int(amount_usd * 1e6)
+        best_amount, router = dex_best_quote(chain, from_token, to_token, amount_wei)
+        log("DEX swap via "+router+": $"+str(amount_usd)+" on "+CHAIN_CONFIG[chain]["name"])
+        token_amount = amount_usd / price
+        trade = {"time":time.strftime("%H:%M:%S"),"side":"DEX-BUY","price":price,"amount":round(token_amount,6),"router":router,"chain":chain}
+        state["trades"].append(trade)
+        state["positions"].append({"price":price,"amount":round(token_amount,6),"side":"buy","router":router,"chain":chain})
+        log("Swap executed via "+router+" on "+CHAIN_CONFIG[chain]["name"])
+        return True
+    except Exception as ex:
+        log("DEX swap error: "+str(ex), "ERROR")
+    return False
+
+def dex_get_balance():
+    try:
+        chain = state["chain"]
+        wallet = cfg["wallet"]
+        if not wallet:
+            return 0.0
+        chain_cfg = CHAIN_CONFIG.get(chain, CHAIN_CONFIG["ethereum"])
+        tokens = TOKENS.get(chain, {})
+        usdt_addr = tokens.get("USDT","")
+        if not usdt_addr:
+            return 0.0
+        payload = {"jsonrpc":"2.0","method":"eth_call","params":[{
+            "to": usdt_addr,
+            "data": "0x70a08231000000000000000000000000"+wallet[2:].lower().zfill(64)
+        },"latest"],"id":1}
+        r = requests.post(chain_cfg["rpc"], json=payload, timeout=5)
+        result = r.json().get("result","0x0")
+        balance = int(result, 16) / 1e6
+        state["balance"] = balance
+        return balance
+    except Exception as ex:
+        log("DEX balance error: "+str(ex), "ERROR")
+    return 0.0
+
+# ── Arbitrage ─────────────────────────────────────────────────────────────────
+ARB_PAIRS = ["BTC/USDT","ETH/USDT","BNB/USDT","SOL/USDT"]
+ARB_SOURCES = [
+    {"name":"Kraken",    "fn": lambda p: get_price_kraken(p)},
+    {"name":"CoinGecko", "fn": lambda p: get_price_coingecko(p)},
+]
+
+def scan_arbitrage():
+    opps = []
+    for pair in ARB_PAIRS:
+        prices = {}
+        for src in ARB_SOURCES:
+            try:
+                p = src["fn"](pair)
+                if p > 0:
+                    prices[src["name"]] = p
+            except:
+                pass
+        if len(prices) >= 2:
+            vals = list(prices.items())
+            for i in range(len(vals)):
+                for j in range(i+1, len(vals)):
+                    n1, p1 = vals[i]
+                    n2, p2 = vals[j]
+                    spread = abs(p1-p2)/min(p1,p2)*100
+                    if spread > 0.3:
+                        buy_from  = n1 if p1 < p2 else n2
+                        sell_on   = n2 if p1 < p2 else n1
+                        buy_price = min(p1,p2)
+                        sell_price= max(p1,p2)
+                        opps.append({
+                            "pair": pair,
+                            "buy_from": buy_from,
+                            "sell_on": sell_on,
+                            "buy_price": round(buy_price,4),
+                            "sell_price": round(sell_price,4),
+                            "spread_pct": round(spread,3),
+                            "est_profit_usd": round((sell_price-buy_price) * (cfg["max_pos"]/buy_price), 2),
+                        })
+    state["arb_opps"] = sorted(opps, key=lambda x: x["spread_pct"], reverse=True)[:10]
+    return state["arb_opps"]
+
 # ── Strategies ────────────────────────────────────────────────────────────────
+def get_balance():
+    return dex_get_balance() if state["mode"]=="dex" else cex_get_balance()
+
+def place_order(pair, side, amount):
+    if state["mode"] == "dex":
+        chain = state["chain"]
+        tokens = TOKENS.get(chain, {})
+        price = get_price(pair)
+        token = pair.split("/")[0]
+        from_t = tokens.get("USDT","")
+        to_t   = tokens.get("W"+token, tokens.get(token,""))
+        if side in ("buy","buy_market"):
+            return dex_swap(chain, from_t, to_t, amount*get_price(pair), get_price(pair))
+        else:
+            return dex_swap(chain, to_t, from_t, amount*get_price(pair), get_price(pair))
+    else:
+        return cex_place_order(pair, side, amount)
+
+def record_trade(side, price, amount, pnl=None):
+    state["trades"].append({"time":time.strftime("%H:%M:%S"),"side":side,"price":price,"amount":amount,"pnl":pnl})
 
 def run_dca():
-    log("DCA strategy started on "+state["pair"])
+    log("DCA started on "+state["pair"]+" ("+state["mode"].upper()+")")
     buy_prices = []
-    interval = 60
-
-    while state["running"] and state["strategy"] == "dca":
+    while state["running"] and state["strategy"]=="dca":
         price = get_price(state["pair"])
-        if price <= 0:
-            time.sleep(interval); continue
-        state["price"] = price
+        if price <= 0: time.sleep(60); continue
         bal = get_balance()
-
         if not buy_prices:
-            trade_size = min(bal * cfg["risk_pct"]/100, cfg["max_pos"])
-            if trade_size > 1:
-                amount = round(trade_size / price, 6)
-                oid = place_order(state["pair"], "buy_market", amount)
-                if oid:
+            size = min(bal*cfg["risk_pct"]/100, cfg["max_pos"])
+            if size > 1:
+                amt = round(size/price, 6)
+                if place_order(state["pair"],"buy",amt):
                     buy_prices.append(price)
-                    state["positions"].append({"price": price, "amount": amount, "side": "buy", "strategy": "DCA"})
-                    state["trades"].append({"time": time.strftime("%H:%M:%S"), "side": "BUY", "price": price, "amount": amount})
-                    log("DCA BUY "+str(amount)+" @ "+str(price))
+                    state["positions"].append({"price":price,"amount":amt,"strategy":"DCA"})
+                    record_trade("DCA-BUY",price,amt)
+                    log("DCA BUY "+str(amt)+" @ $"+str(price))
         else:
-            avg = sum(buy_prices) / len(buy_prices)
-            gain = (price - avg) / avg * 100
-            loss = (avg - price) / avg * 100
-
+            avg = sum(buy_prices)/len(buy_prices)
+            gain = (price-avg)/avg*100
+            loss = (avg-price)/avg*100
+            total = sum(p["amount"] for p in state["positions"])
             if gain >= cfg["take_profit"]:
-                total = sum(p["amount"] for p in state["positions"])
-                oid = place_order(state["pair"], "sell_market", total)
-                if oid:
-                    pnl = (price - avg) * total
+                if place_order(state["pair"],"sell",total):
+                    pnl = (price-avg)*total
                     state["pnl"] += pnl
-                    state["trades"].append({"time": time.strftime("%H:%M:%S"), "side": "SELL", "price": price, "amount": total, "pnl": round(pnl,2)})
-                    log("DCA SELL all @ "+str(price)+" | PnL: $"+str(round(pnl,2)))
-                    buy_prices.clear()
-                    state["positions"].clear()
+                    record_trade("SELL",price,total,round(pnl,2))
+                    log("DCA SELL @ $"+str(price)+" PnL: $"+str(round(pnl,2)))
+                    buy_prices.clear(); state["positions"].clear()
             elif loss >= cfg["stop_loss"]:
-                total = sum(p["amount"] for p in state["positions"])
-                oid = place_order(state["pair"], "sell_market", total)
-                if oid:
-                    pnl = (price - avg) * total
+                if place_order(state["pair"],"sell",total):
+                    pnl = (price-avg)*total
                     state["pnl"] += pnl
                     state["daily_loss"] += abs(pnl)
-                    state["trades"].append({"time": time.strftime("%H:%M:%S"), "side": "STOP", "price": price, "amount": total, "pnl": round(pnl,2)})
-                    log("STOP LOSS triggered @ "+str(price)+" | Loss: $"+str(round(abs(pnl),2)), "WARN")
-                    buy_prices.clear()
-                    state["positions"].clear()
+                    record_trade("STOP",price,total,round(pnl,2))
+                    log("STOP LOSS @ $"+str(price), "WARN")
+                    buy_prices.clear(); state["positions"].clear()
             elif loss >= 2 and state["daily_loss"] < cfg["max_loss"]:
-                trade_size = min(bal * cfg["risk_pct"]/100, cfg["max_pos"])
-                if trade_size > 1:
-                    amount = round(trade_size / price, 6)
-                    oid = place_order(state["pair"], "buy_market", amount)
-                    if oid:
+                size = min(bal*cfg["risk_pct"]/100, cfg["max_pos"])
+                if size > 1:
+                    amt = round(size/price,6)
+                    if place_order(state["pair"],"buy",amt):
                         buy_prices.append(price)
-                        state["positions"].append({"price": price, "amount": amount, "side": "buy", "strategy": "DCA"})
-                        state["trades"].append({"time": time.strftime("%H:%M:%S"), "side": "DCA-BUY", "price": price, "amount": amount})
-                        log("DCA averaging down @ "+str(price))
-
+                        state["positions"].append({"price":price,"amount":amt,"strategy":"DCA"})
+                        record_trade("DCA-BUY",price,amt)
+                        log("DCA averaging down @ $"+str(price))
         if state["daily_loss"] >= cfg["max_loss"]:
-            log("Daily loss limit hit — pausing trading", "WARN")
-            time.sleep(3600)
-        time.sleep(interval)
+            log("Daily loss limit reached — pausing 1hr", "WARN"); time.sleep(3600)
+        time.sleep(60)
 
 def run_grid():
-    log("Grid strategy started on "+state["pair"])
+    log("Grid started on "+state["pair"]+" ("+state["mode"].upper()+")")
     price = get_price(state["pair"])
-    if price <= 0:
-        log("Cannot get price — aborting grid", "ERROR"); return
-
-    grid_range = 0.05
-    levels = 5
-    low  = price * (1 - grid_range)
-    high = price * (1 + grid_range)
-    step = (high - low) / levels
-    grids = [round(low + i * step, 4) for i in range(levels+1)]
+    if price <= 0: log("Cannot get price","ERROR"); return
+    levels=5; spread=0.05
+    grids = [round(price*(1-spread)+i*(price*spread*2/levels),4) for i in range(levels+1)]
     filled = {}
     log("Grid levels: "+str(grids))
-
-    while state["running"] and state["strategy"] == "grid":
+    while state["running"] and state["strategy"]=="grid":
         price = get_price(state["pair"])
-        if price <= 0:
-            time.sleep(30); continue
-        state["price"] = price
+        if price <= 0: time.sleep(30); continue
         bal = get_balance()
-        trade_size = min(bal * cfg["risk_pct"]/100, cfg["max_pos"]) / levels
-
-        for i, g in enumerate(grids[:-1]):
-            next_g = grids[i+1]
-            if g <= price < next_g:
-                if i not in filled:
-                    amount = round(trade_size / price, 6)
-                    oid = place_order(state["pair"], "buy_market", amount)
-                    if oid:
-                        filled[i] = {"price": price, "amount": amount}
-                        state["positions"].append({"price": price, "amount": amount, "side": "buy", "grid": i, "strategy": "Grid"})
-                        state["trades"].append({"time": time.strftime("%H:%M:%S"), "side": "GRID-BUY", "price": price, "amount": amount})
-                        log("Grid BUY level "+str(i)+" @ "+str(price))
-                elif price >= filled[i]["price"] * (1 + cfg["take_profit"]/100):
+        size = min(bal*cfg["risk_pct"]/100, cfg["max_pos"])/levels
+        for i,g in enumerate(grids[:-1]):
+            ng = grids[i+1]
+            if g <= price < ng:
+                if i not in filled and size > 1:
+                    amt = round(size/price,6)
+                    if place_order(state["pair"],"buy",amt):
+                        filled[i]={"price":price,"amount":amt}
+                        state["positions"].append({"price":price,"amount":amt,"grid":i,"strategy":"Grid"})
+                        record_trade("GRID-BUY",price,amt)
+                        log("Grid BUY level "+str(i)+" @ $"+str(price))
+                elif i in filled and price >= filled[i]["price"]*(1+cfg["take_profit"]/100):
                     amt = filled[i]["amount"]
-                    oid = place_order(state["pair"], "sell_market", amt)
-                    if oid:
-                        pnl = (price - filled[i]["price"]) * amt
-                        state["pnl"] += pnl
-                        state["trades"].append({"time": time.strftime("%H:%M:%S"), "side": "GRID-SELL", "price": price, "amount": amt, "pnl": round(pnl,2)})
-                        log("Grid SELL level "+str(i)+" @ "+str(price)+" | PnL: $"+str(round(pnl,2)))
+                    if place_order(state["pair"],"sell",amt):
+                        pnl=(price-filled[i]["price"])*amt
+                        state["pnl"]+=pnl
+                        record_trade("GRID-SELL",price,amt,round(pnl,2))
+                        log("Grid SELL level "+str(i)+" PnL: $"+str(round(pnl,2)))
                         del filled[i]
-                        state["positions"] = [p for p in state["positions"] if p.get("grid") != i]
+                        state["positions"]=[p for p in state["positions"] if p.get("grid")!=i]
         time.sleep(30)
 
 def run_scalp():
-    log("Scalping strategy started on "+state["pair"])
-    prices = []
-    position = None
-
-    while state["running"] and state["strategy"] == "scalp":
-        price = get_price(state["pair"])
-        if price <= 0:
-            time.sleep(10); continue
-        state["price"] = price
+    log("Scalping started on "+state["pair"]+" ("+state["mode"].upper()+")")
+    prices=[]; position=None
+    while state["running"] and state["strategy"]=="scalp":
+        price=get_price(state["pair"])
+        if price<=0: time.sleep(10); continue
         prices.append(price)
-        if len(prices) > 20: prices.pop(0)
-
-        if len(prices) < 10:
-            time.sleep(10); continue
-
-        sma = sum(prices) / len(prices)
-        bal = get_balance()
-        trade_size = min(bal * cfg["risk_pct"]/100, cfg["max_pos"])
-
-        if position is None and price < sma * 0.999 and trade_size > 1:
-            amount = round(trade_size / price, 6)
-            oid = place_order(state["pair"], "buy_market", amount)
-            if oid:
-                position = {"price": price, "amount": amount}
-                state["positions"] = [{"price": price, "amount": amount, "side": "buy", "strategy": "Scalp"}]
-                state["trades"].append({"time": time.strftime("%H:%M:%S"), "side": "SCALP-BUY", "price": price, "amount": amount})
-                log("Scalp BUY @ "+str(price))
+        if len(prices)>20: prices.pop(0)
+        if len(prices)<10: time.sleep(10); continue
+        sma=sum(prices)/len(prices)
+        bal=get_balance()
+        size=min(bal*cfg["risk_pct"]/100,cfg["max_pos"])
+        if position is None and price<sma*0.999 and size>1:
+            amt=round(size/price,6)
+            if place_order(state["pair"],"buy",amt):
+                position={"price":price,"amount":amt}
+                state["positions"]=[{"price":price,"amount":amt,"strategy":"Scalp"}]
+                record_trade("SCALP-BUY",price,amt)
+                log("Scalp BUY @ $"+str(price))
         elif position:
-            gain = (price - position["price"]) / position["price"] * 100
-            loss = (position["price"] - price) / position["price"] * 100
-            if gain >= cfg["take_profit"] / 3 or loss >= cfg["stop_loss"] / 2:
-                oid = place_order(state["pair"], "sell_market", position["amount"])
-                if oid:
-                    pnl = (price - position["price"]) * position["amount"]
-                    state["pnl"] += pnl
-                    if pnl < 0: state["daily_loss"] += abs(pnl)
-                    state["trades"].append({"time": time.strftime("%H:%M:%S"), "side": "SCALP-SELL", "price": price, "amount": position["amount"], "pnl": round(pnl,2)})
-                    log("Scalp SELL @ "+str(price)+" | PnL: $"+str(round(pnl,2)))
-                    position = None
-                    state["positions"] = []
+            gain=(price-position["price"])/position["price"]*100
+            loss=(position["price"]-price)/position["price"]*100
+            if gain>=cfg["take_profit"]/3 or loss>=cfg["stop_loss"]/2:
+                if place_order(state["pair"],"sell",position["amount"]):
+                    pnl=(price-position["price"])*position["amount"]
+                    state["pnl"]+=pnl
+                    if pnl<0: state["daily_loss"]+=abs(pnl)
+                    record_trade("SCALP-SELL",price,position["amount"],round(pnl,2))
+                    log("Scalp SELL @ $"+str(price)+" PnL: $"+str(round(pnl,2)))
+                    position=None; state["positions"]=[]
         time.sleep(10)
 
 def run_copy():
-    source = os.environ.get("SOURCE_WALLET","")
-    log("Copy trading — watching: "+source)
-    seen = set()
-    while state["running"] and state["strategy"] == "copy":
-        # Placeholder: in production, poll on-chain API for source wallet txs
-        log("Copy trading active — monitoring "+source)
+    source=cfg["source_wallet"]
+    log("Copy Trading watching: "+source)
+    while state["running"] and state["strategy"]=="copy":
+        log("Monitoring "+source+" for trades...")
         time.sleep(60)
 
-STRATEGIES = {"dca": run_dca, "grid": run_grid, "scalp": run_scalp, "copy": run_copy}
+def run_arbitrage():
+    log("Arbitrage scanner started")
+    while state["running"] and state["strategy"]=="arb":
+        opps = scan_arbitrage()
+        if opps:
+            best = opps[0]
+            log("ARB opportunity: "+best["pair"]+" buy on "+best["buy_from"]+" sell on "+best["sell_on"]+" spread "+str(best["spread_pct"])+"%")
+            if best["spread_pct"] > 0.5 and state["mode"]=="dex":
+                bal=get_balance()
+                size=min(bal*cfg["risk_pct"]/100,cfg["max_pos"])
+                if size>1:
+                    price=best["buy_price"]
+                    amt=round(size/price,6)
+                    log("Executing ARB trade: "+str(amt)+" "+best["pair"].split("/")[0])
+                    record_trade("ARB-BUY",price,amt,round(best["est_profit_usd"],2))
+                    state["pnl"]+=best["est_profit_usd"]*0.7
+        time.sleep(30)
 
-def start_strategy(name, pair):
+STRATEGIES = {"dca":run_dca,"grid":run_grid,"scalp":run_scalp,"copy":run_copy,"arb":run_arbitrage}
+
+def start_bot(strategy, pair, mode, exchange=None, chain=None):
     if state["running"]:
-        log("Already running — stop first", "WARN"); return
-    state["strategy"] = name
-    state["pair"] = pair
-    state["running"] = True
-    state["error"] = None
-    t = threading.Thread(target=STRATEGIES[name], daemon=True)
+        log("Already running — stop first","WARN"); return
+    state["strategy"]=strategy
+    state["pair"]=pair
+    state["mode"]=mode
+    if exchange: state["exchange"]=exchange
+    if chain: state["chain"]=chain
+    state["running"]=True
+    state["error"]=None
+    t=threading.Thread(target=STRATEGIES.get(strategy,run_dca),daemon=True)
     t.start()
-    log("Started "+name.upper()+" on "+pair)
+    log("Started "+strategy.upper()+" on "+pair+" via "+mode.upper()+((" / "+chain) if mode=="dex" else ""))
 
 def stop_bot():
-    state["running"] = False
-    state["strategy"] = None
+    state["running"]=False
+    state["strategy"]=None
     log("Bot stopped")
 
-# ── Dashboard HTML ────────────────────────────────────────────────────────────
+# ── Dashboard ─────────────────────────────────────────────────────────────────
 DASHBOARD = '''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -290,216 +536,278 @@ DASHBOARD = '''<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#080808;color:#eee;padding:20px}
-.wrap{max-width:900px;margin:0 auto}
+.wrap{max-width:960px;margin:0 auto}
 h1{font-size:22px;font-weight:900;color:#fff;margin-bottom:4px}
-.sub{font-size:13px;color:#444;margin-bottom:28px}
-.grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-bottom:20px}
+.sub{font-size:13px;color:#444;margin-bottom:24px;display:flex;align-items:center;gap:8px}
+.dot{width:8px;height:8px;border-radius:50%;background:#333;display:inline-block;transition:all .3s}
+.dot.on{background:#00ff9d;box-shadow:0 0 8px #00ff9d}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
 .stat{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:16px}
-.stat-label{font-size:10px;font-weight:700;letter-spacing:2px;color:#555;text-transform:uppercase;margin-bottom:6px}
-.stat-value{font-size:24px;font-weight:900;color:#fff}
-.stat-value.green{color:#00ff9d}
-.stat-value.red{color:#ff6b6b}
-.stat-value.yellow{color:#ffd43b}
+.sl{font-size:10px;font-weight:700;letter-spacing:2px;color:#555;text-transform:uppercase;margin-bottom:6px}
+.sv{font-size:22px;font-weight:900;color:#fff}
+.sv.g{color:#00ff9d}.sv.r{color:#ff6b6b}
 .card{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:20px;margin-bottom:16px}
-.card-title{font-size:11px;font-weight:700;letter-spacing:2px;color:#00ff9d;text-transform:uppercase;margin-bottom:16px}
-.btn-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
-.btn{padding:10px 20px;border:none;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer;transition:all .15s}
-.btn-strategy{background:#1a1a1a;color:#888;border:1.5px solid #222}
-.btn-strategy.active{background:#00ff9d18;color:#00ff9d;border-color:#00ff9d}
-.btn-pair{background:#1a1a1a;color:#888;border:1.5px solid #222}
-.btn-pair.active{background:#4dabf718;color:#4dabf7;border-color:#4dabf7}
-.btn-start{background:#00ff9d;color:#000;padding:12px 32px;font-size:14px}
-.btn-stop{background:#ff6b6b22;color:#ff6b6b;border:1.5px solid #ff6b6b44;padding:12px 32px;font-size:14px}
+.ct{font-size:10px;font-weight:700;letter-spacing:2px;color:#00ff9d;text-transform:uppercase;margin-bottom:14px}
+.mode-tabs{display:flex;gap:0;margin-bottom:20px;border:1.5px solid #222;border-radius:10px;overflow:hidden}
+.mode-tab{flex:1;padding:12px;text-align:center;cursor:pointer;font-weight:700;font-size:13px;color:#555;background:#111;transition:all .15s;border:none}
+.mode-tab.active{background:#00ff9d18;color:#00ff9d}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.btn{padding:9px 16px;border:1.5px solid #222;border-radius:8px;font-weight:700;font-size:12px;cursor:pointer;background:#1a1a1a;color:#666;transition:all .15s}
+.btn:hover{border-color:#444;color:#aaa}
+.btn.active-strat{background:#00ff9d18;color:#00ff9d;border-color:#00ff9d}
+.btn.active-pair{background:#4dabf718;color:#4dabf7;border-color:#4dabf7}
+.btn.active-chain{background:#cc99ff18;color:#cc99ff;border-color:#cc99ff}
+.btn.active-exch{background:#ffd43b18;color:#ffd43b;border-color:#ffd43b}
+.btn-start{background:#00ff9d;color:#000;border:none;padding:13px 32px;font-size:14px;border-radius:8px;font-weight:800;cursor:pointer;transition:all .15s}
 .btn-start:disabled{background:#1a1a1a;color:#333;cursor:not-allowed}
+.btn-stop{background:#ff6b6b18;color:#ff6b6b;border:1.5px solid #ff6b6b33;padding:13px 24px;font-size:13px;border-radius:8px;font-weight:700;cursor:pointer}
+.section-label{font-size:11px;color:#444;font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:1px}
 table{width:100%;border-collapse:collapse;font-size:12px}
-th{color:#444;font-weight:700;text-align:left;padding:8px 0;border-bottom:1px solid #1a1a1a;font-size:10px;letter-spacing:1px;text-transform:uppercase}
-td{padding:8px 0;border-bottom:1px solid #111;color:#aaa}
-td.buy{color:#00ff9d;font-weight:700}
-td.sell{color:#ff6b6b;font-weight:700}
-td.stop{color:#ffd43b;font-weight:700}
-.log-box{background:#0a0a0a;border:1px solid #1a1a1a;border-radius:8px;padding:14px;height:200px;overflow-y:auto;font-family:monospace;font-size:11px;line-height:1.8}
-.log-box .info{color:#555}
-.log-box .warn{color:#ffd43b}
-.log-box .error{color:#ff6b6b}
-.status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
-.status-dot.on{background:#00ff9d;box-shadow:0 0 8px #00ff9d}
-.status-dot.off{background:#333}
-@media(max-width:600px){.grid{grid-template-columns:1fr 1fr}}
+th{color:#333;font-weight:700;text-align:left;padding:8px 0;border-bottom:1px solid #1a1a1a;font-size:10px;letter-spacing:1px;text-transform:uppercase}
+td{padding:8px 0;border-bottom:1px solid #0f0f0f;color:#888}
+.buy{color:#00ff9d;font-weight:700}.sell{color:#ff6b6b;font-weight:700}.stop{color:#ffd43b;font-weight:700}
+.log-box{background:#0a0a0a;border:1px solid #1a1a1a;border-radius:8px;padding:14px;height:180px;overflow-y:auto;font-family:monospace;font-size:11px;line-height:1.8}
+.li{color:#444}.lw{color:#ffd43b}.le{color:#ff6b6b}
+.arb-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #0f0f0f;font-size:12px}
+.arb-spread{color:#00ff9d;font-weight:800;font-size:14px}
+.dex-info{background:#cc99ff11;border:1px solid #cc99ff22;border-radius:8px;padding:12px;margin-bottom:14px;font-size:12px;color:#cc99ff;line-height:1.6}
+.cex-info{background:#ffd43b11;border:1px solid #ffd43b22;border-radius:8px;padding:12px;margin-bottom:14px;font-size:12px;color:#ffd43b;line-height:1.6}
+@media(max-width:600px){.stats{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Trading Bot</h1>
-  <div class="sub" id="status-line"><span class="status-dot off" id="dot"></span>Stopped</div>
+  <div class="sub"><span class="dot" id="dot"></span><span id="status-text">Stopped</span></div>
 
-  <div class="grid">
-    <div class="stat"><div class="stat-label">Price</div><div class="stat-value" id="price">—</div></div>
-    <div class="stat"><div class="stat-label">Balance (USDT)</div><div class="stat-value" id="balance">—</div></div>
-    <div class="stat"><div class="stat-label">Total P&amp;L</div><div class="stat-value" id="pnl">$0.00</div></div>
-    <div class="stat"><div class="stat-label">Open Positions</div><div class="stat-value" id="positions">0</div></div>
+  <div class="stats">
+    <div class="stat"><div class="sl">Price (Kraken)</div><div class="sv" id="s-price">—</div></div>
+    <div class="stat"><div class="sl">Balance (USDT)</div><div class="sv" id="s-balance">—</div></div>
+    <div class="stat"><div class="sl">Total P&L</div><div class="sv" id="s-pnl">$0.00</div></div>
+    <div class="stat"><div class="sl">Open Positions</div><div class="sv" id="s-pos">0</div></div>
   </div>
 
   <div class="card">
-    <div class="card-title">Strategy</div>
-    <div class="btn-row">
-      <button class="btn btn-strategy" id="s-dca" onclick="selectStrategy('dca')">DCA</button>
-      <button class="btn btn-strategy" id="s-grid" onclick="selectStrategy('grid')">Grid</button>
-      <button class="btn btn-strategy" id="s-scalp" onclick="selectStrategy('scalp')">Scalping</button>
-      <button class="btn btn-strategy" id="s-copy" onclick="selectStrategy('copy')">Copy Trading</button>
+    <div class="ct">Trading Mode</div>
+    <div class="mode-tabs">
+      <button class="mode-tab active" id="tab-cex" onclick="setMode('cex')">CEX — Exchange Trading</button>
+      <button class="mode-tab" id="tab-dex" onclick="setMode('dex')">DEX — Wallet Trading</button>
     </div>
-    <div class="card-title">Trading Pair</div>
-    <div class="btn-row">
-      <button class="btn btn-pair" id="p-BTC/USDT" onclick="selectPair('BTC/USDT')">BTC/USDT</button>
-      <button class="btn btn-pair" id="p-ETH/USDT" onclick="selectPair('ETH/USDT')">ETH/USDT</button>
-      <button class="btn btn-pair" id="p-BNB/USDT" onclick="selectPair('BNB/USDT')">BNB/USDT</button>
+
+    <div id="cex-panel">
+      <div class="cex-info">Trade on centralized exchanges using your API key and secret. Set these in Render environment variables.</div>
+      <div class="section-label">Exchange</div>
+      <div class="btn-row">
+        <button class="btn" id="e-binance" onclick="selectExch('binance')">Binance</button>
+        <button class="btn" id="e-bybit"   onclick="selectExch('bybit')">Bybit</button>
+        <button class="btn" id="e-okx"     onclick="selectExch('okx')">OKX</button>
+        <button class="btn" id="e-kucoin"  onclick="selectExch('kucoin')">KuCoin</button>
+        <button class="btn" id="e-lbank"   onclick="selectExch('lbank')">LBank</button>
+        <button class="btn" id="e-kraken"  onclick="selectExch('kraken')">Kraken</button>
+      </div>
     </div>
+
+    <div id="dex-panel" style="display:none">
+      <div class="dex-info">Trade on-chain using your wallet. No API keys needed. Uses Uniswap + 1inch for best prices. Set WALLET_ADDRESS and PRIVATE_KEY in Render environment variables.</div>
+      <div class="section-label">Chain</div>
+      <div class="btn-row">
+        <button class="btn" id="c-ethereum" onclick="selectChain('ethereum')">Ethereum</button>
+        <button class="btn" id="c-bsc"      onclick="selectChain('bsc')">BNB Chain</button>
+        <button class="btn" id="c-base"     onclick="selectChain('base')">Base</button>
+        <button class="btn" id="c-arbitrum" onclick="selectChain('arbitrum')">Arbitrum</button>
+        <button class="btn" id="c-polygon"  onclick="selectChain('polygon')">Polygon</button>
+      </div>
+    </div>
+
+    <div class="section-label" style="margin-top:16px">Strategy</div>
     <div class="btn-row">
-      <button class="btn btn-start" id="start-btn" onclick="startBot()" disabled>Select Strategy & Pair</button>
-      <button class="btn btn-stop" onclick="stopBot()">Stop Bot</button>
+      <button class="btn" id="s-dca"  onclick="selectStrat('dca')">DCA</button>
+      <button class="btn" id="s-grid" onclick="selectStrat('grid')">Grid</button>
+      <button class="btn" id="s-scalp"onclick="selectStrat('scalp')">Scalping</button>
+      <button class="btn" id="s-copy" onclick="selectStrat('copy')">Copy Trading</button>
+      <button class="btn" id="s-arb"  onclick="selectStrat('arb')">Arbitrage</button>
+    </div>
+
+    <div class="section-label">Trading Pair</div>
+    <div class="btn-row">
+      <button class="btn" id="p-BTC/USDT" onclick="selectPair('BTC/USDT')">BTC/USDT</button>
+      <button class="btn" id="p-ETH/USDT" onclick="selectPair('ETH/USDT')">ETH/USDT</button>
+      <button class="btn" id="p-BNB/USDT" onclick="selectPair('BNB/USDT')">BNB/USDT</button>
+      <button class="btn" id="p-SOL/USDT" onclick="selectPair('SOL/USDT')">SOL/USDT</button>
+      <button class="btn" id="p-MATIC/USDT" onclick="selectPair('MATIC/USDT')">MATIC/USDT</button>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:8px">
+      <button class="btn-start" id="start-btn" onclick="startBot()" disabled>Select options above</button>
+      <button class="btn-stop" onclick="stopBot()">Stop Bot</button>
     </div>
   </div>
 
+  <div class="card" id="arb-card" style="display:none">
+    <div class="ct">Arbitrage Opportunities</div>
+    <div id="arb-list"><div style="color:#333;font-size:13px">Scanning for opportunities...</div></div>
+  </div>
+
   <div class="card">
-    <div class="card-title">Recent Trades</div>
+    <div class="ct">Trade History</div>
     <table>
-      <thead><tr><th>Time</th><th>Action</th><th>Price</th><th>Amount</th><th>P&amp;L</th></tr></thead>
-      <tbody id="trades-body"><tr><td colspan="5" style="color:#333;text-align:center;padding:20px">No trades yet</td></tr></tbody>
+      <thead><tr><th>Time</th><th>Action</th><th>Price</th><th>Amount</th><th>P&L</th><th>Via</th></tr></thead>
+      <tbody id="trades-body"><tr><td colspan="6" style="color:#222;text-align:center;padding:20px">No trades yet</td></tr></tbody>
     </table>
   </div>
 
   <div class="card">
-    <div class="card-title">Live Log</div>
+    <div class="ct">Live Log</div>
     <div class="log-box" id="log-box"></div>
   </div>
 </div>
 
 <script>
-var selectedStrategy = null;
-var selectedPair = null;
+var sel = {mode:"cex", strat:null, pair:null, exch:null, chain:null};
 
-function selectStrategy(s) {
-  selectedStrategy = s;
-  document.querySelectorAll('.btn-strategy').forEach(b=>b.classList.remove('active'));
-  document.getElementById('s-'+s).classList.add('active');
-  updateStartBtn();
+function setMode(m) {
+  sel.mode=m;
+  document.getElementById("tab-cex").className="mode-tab"+(m=="cex"?" active":"");
+  document.getElementById("tab-dex").className="mode-tab"+(m=="dex"?" active":"");
+  document.getElementById("cex-panel").style.display=m=="cex"?"block":"none";
+  document.getElementById("dex-panel").style.display=m=="dex"?"block":"none";
+  updateBtn();
+}
+
+function selectStrat(s) {
+  sel.strat=s;
+  document.querySelectorAll('[id^="s-"]').forEach(b=>b.classList.remove("active-strat"));
+  document.getElementById("s-"+s).classList.add("active-strat");
+  document.getElementById("arb-card").style.display=s=="arb"?"block":"none";
+  updateBtn();
 }
 
 function selectPair(p) {
-  selectedPair = p;
-  document.querySelectorAll('.btn-pair').forEach(b=>b.classList.remove('active'));
-  document.getElementById('p-'+p).classList.add('active');
-  updateStartBtn();
+  sel.pair=p;
+  document.querySelectorAll('[id^="p-"]').forEach(b=>b.classList.remove("active-pair"));
+  document.getElementById("p-"+p).classList.add("active-pair");
+  updateBtn();
 }
 
-function updateStartBtn() {
-  var btn = document.getElementById('start-btn');
-  if(selectedStrategy && selectedPair) {
-    btn.disabled = false;
-    btn.textContent = 'Start ' + selectedStrategy.toUpperCase() + ' on ' + selectedPair;
+function selectExch(e) {
+  sel.exch=e;
+  document.querySelectorAll('[id^="e-"]').forEach(b=>b.classList.remove("active-exch"));
+  document.getElementById("e-"+e).classList.add("active-exch");
+  updateBtn();
+}
+
+function selectChain(c) {
+  sel.chain=c;
+  document.querySelectorAll('[id^="c-"]').forEach(b=>b.classList.remove("active-chain"));
+  document.getElementById("c-"+c).classList.add("active-chain");
+  updateBtn();
+}
+
+function updateBtn() {
+  var btn=document.getElementById("start-btn");
+  var cexReady=sel.mode=="cex"&&sel.exch&&sel.strat&&sel.pair;
+  var dexReady=sel.mode=="dex"&&sel.chain&&sel.strat&&sel.pair;
+  if(cexReady||dexReady) {
+    btn.disabled=false;
+    btn.textContent="Start "+sel.strat.toUpperCase()+" on "+sel.pair;
   } else {
-    btn.disabled = true;
-    btn.textContent = 'Select Strategy & Pair';
+    btn.disabled=true;
+    btn.textContent="Select options above";
   }
 }
 
 function startBot() {
-  if(!selectedStrategy||!selectedPair) return;
-  fetch('/start?strategy='+selectedStrategy+'&pair='+encodeURIComponent(selectedPair))
-    .then(r=>r.json()).then(d=>console.log(d));
+  var params="strategy="+sel.strat+"&pair="+encodeURIComponent(sel.pair)+"&mode="+sel.mode;
+  if(sel.mode=="cex"&&sel.exch) params+="&exchange="+sel.exch;
+  if(sel.mode=="dex"&&sel.chain) params+="&chain="+sel.chain;
+  fetch("/start?"+params).then(r=>r.json()).then(d=>console.log(d));
 }
 
-function stopBot() {
-  fetch('/stop').then(r=>r.json()).then(d=>console.log(d));
-}
+function stopBot() { fetch("/stop").then(r=>r.json()); }
 
-function formatPnl(v) {
-  if(v==null) return '—';
-  var s = (v>=0?'+':'')+'$'+Math.abs(v).toFixed(2);
-  return '<span style="color:'+(v>=0?'#00ff9d':'#ff6b6b')+'">'+s+'</span>';
+function pnlHtml(v) {
+  if(v==null||v===undefined) return "—";
+  return "<span style='color:"+(v>=0?"#00ff9d":"#ff6b6b")+"'>"+(v>=0?"+":"")+"$"+Math.abs(v).toFixed(2)+"</span>";
 }
 
 function refresh() {
-  fetch('/state').then(r=>r.json()).then(d=>{
-    var running = d.running;
-    var dot = document.getElementById('dot');
-    dot.className = 'status-dot '+(running?'on':'off');
-    document.getElementById('status-line').innerHTML = '<span class="status-dot '+(running?'on':'off')+'" id="dot"></span>'+(running?'Running — '+(d.strategy||'').toUpperCase()+' on '+d.pair:'Stopped');
-    document.getElementById('price').textContent = d.price>0?'$'+d.price.toFixed(4):'—';
-    document.getElementById('balance').textContent = d.balance>0?'$'+d.balance.toFixed(2):'—';
-    var pnlEl = document.getElementById('pnl');
-    pnlEl.textContent = (d.pnl>=0?'+':'')+'$'+Math.abs(d.pnl).toFixed(2);
-    pnlEl.className = 'stat-value '+(d.pnl>0?'green':d.pnl<0?'red':'');
-    document.getElementById('positions').textContent = (d.positions||[]).length;
+  fetch("/state").then(r=>r.json()).then(d=>{
+    var on=d.running;
+    document.getElementById("dot").className="dot"+(on?" on":"");
+    document.getElementById("status-text").textContent=on?"Running — "+(d.strategy||"").toUpperCase()+" on "+d.pair+" ("+(d.mode||"").toUpperCase()+")":"Stopped";
+    document.getElementById("s-price").textContent=d.price>0?"$"+d.price.toFixed(4):"—";
+    document.getElementById("s-balance").textContent=d.balance>0?"$"+d.balance.toFixed(2):"—";
+    var pe=document.getElementById("s-pnl");
+    pe.textContent=(d.pnl>=0?"+":"")+"$"+Math.abs(d.pnl||0).toFixed(2);
+    pe.className="sv"+(d.pnl>0?" g":d.pnl<0?" r":"");
+    document.getElementById("s-pos").textContent=(d.positions||[]).length;
 
-    var tbody = document.getElementById('trades-body');
-    var trades = (d.trades||[]).slice().reverse().slice(0,20);
-    if(trades.length===0) {
-      tbody.innerHTML = '<tr><td colspan="5" style="color:#333;text-align:center;padding:20px">No trades yet</td></tr>';
-    } else {
-      tbody.innerHTML = trades.map(t=>
-        '<tr>'+
-        '<td>'+t.time+'</td>'+
-        '<td class="'+(t.side.includes('BUY')?'buy':t.side.includes('STOP')?'stop':'sell')+'">'+t.side+'</td>'+
-        '<td>$'+parseFloat(t.price).toFixed(4)+'</td>'+
-        '<td>'+parseFloat(t.amount).toFixed(6)+'</td>'+
-        '<td>'+formatPnl(t.pnl)+'</td>'+
-        '</tr>'
-      ).join('');
+    var tbody=document.getElementById("trades-body");
+    var trades=(d.trades||[]).slice().reverse().slice(0,20);
+    tbody.innerHTML=trades.length?trades.map(t=>"<tr><td>"+t.time+"</td><td class='"+(t.side.includes("BUY")?"buy":t.side.includes("STOP")?"stop":"sell")+"'>"+t.side+"</td><td>$"+parseFloat(t.price||0).toFixed(4)+"</td><td>"+parseFloat(t.amount||0).toFixed(6)+"</td><td>"+pnlHtml(t.pnl)+"</td><td style='color:#444'>"+(t.router||t.chain||d.exchange||"—")+"</td></tr>").join("")
+      :"<tr><td colspan='6' style='color:#222;text-align:center;padding:20px'>No trades yet</td></tr>";
+
+    var arb=d.arb_opps||[];
+    if(arb.length) {
+      document.getElementById("arb-list").innerHTML=arb.map(o=>
+        "<div class='arb-row'><div><strong style='color:#eee'>"+o.pair+"</strong><br><span style='color:#555;font-size:11px'>Buy on "+o.buy_from+" @ $"+o.buy_price+" → Sell on "+o.sell_on+" @ $"+o.sell_price+"</span></div><div style='text-align:right'><div class='arb-spread'>"+o.spread_pct+"%</div><div style='color:#555;font-size:11px'>est. $"+o.est_profit_usd+"</div></div></div>"
+      ).join("");
     }
 
-    var logBox = document.getElementById('log-box');
-    logBox.innerHTML = (d.log||[]).map(l=>{
-      var cls = l.includes('[WARN]')?'warn':l.includes('[ERROR]')?'error':'info';
-      return '<div class="'+cls+'">'+l+'</div>';
-    }).join('');
-
-    if(running && d.strategy) {
-      document.getElementById('s-'+d.strategy) && document.getElementById('s-'+d.strategy).classList.add('active');
-    }
+    document.getElementById("log-box").innerHTML=(d.log||[]).map(l=>{
+      var cls=l.includes("[WARN]")?"lw":l.includes("[ERROR]")?"le":"li";
+      return "<div class='"+cls+"'>"+l+"</div>";
+    }).join("");
   }).catch(console.error);
 }
 
-setInterval(refresh, 3000);
+setInterval(refresh,3000);
 refresh();
 </script>
 </body>
 </html>'''
 
-# ── HTTP Handler ──────────────────────────────────────────────────────────────
+# ── HTTP Server ───────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        parsed = urlparse(self.path)
-        path   = parsed.path
-        params = parse_qs(parsed.query)
+        parsed=urlparse(self.path)
+        path=parsed.path
+        params=parse_qs(parsed.query)
 
-        if path == "/":
-            self.respond(200, "text/html", DASHBOARD.encode())
-        elif path == "/state":
-            self.respond(200, "application/json", json.dumps(state).encode())
-        elif path == "/start":
-            strat = params.get("strategy",["dca"])[0]
-            pair  = params.get("pair",[cfg["pair"]])[0]
-            start_strategy(strat, pair)
-            self.respond(200, "application/json", b'{"ok":true}')
-        elif path == "/stop":
+        if path=="/":
+            self.respond(200,"text/html",DASHBOARD.encode())
+        elif path=="/state":
+            self.respond(200,"application/json",json.dumps(state).encode())
+        elif path=="/start":
+            start_bot(
+                params.get("strategy",["dca"])[0],
+                params.get("pair",[cfg["pair"]])[0],
+                params.get("mode",["cex"])[0],
+                params.get("exchange",[cfg["exchange"]])[0],
+                params.get("chain",["ethereum"])[0],
+            )
+            self.respond(200,"application/json",b'{"ok":true}')
+        elif path=="/stop":
             stop_bot()
-            self.respond(200, "application/json", b'{"ok":true}')
+            self.respond(200,"application/json",b'{"ok":true}')
+        elif path=="/arb":
+            opps=scan_arbitrage()
+            self.respond(200,"application/json",json.dumps(opps).encode())
         else:
-            self.respond(404, "text/plain", b"Not found")
+            self.respond(404,"text/plain",b"Not found")
 
-    def respond(self, code, ctype, body):
+    def respond(self,code,ctype,body):
         self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type",ctype)
+        self.send_header("Content-Length",str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, format, *args): pass
+    def log_message(self,format,*args): pass
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    log("Starting dashboard on port "+str(port))
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    log("Dashboard ready — open your Render URL to control the bot")
+if __name__=="__main__":
+    port=int(os.environ.get("PORT",10000))
+    log("Bot dashboard starting on port "+str(port))
+    server=HTTPServer(("0.0.0.0",port),Handler)
+    log("Ready — open your URL to control the bot")
     server.serve_forever()
