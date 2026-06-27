@@ -34,7 +34,7 @@ cfg = {
     "source_wallet":os.environ.get("SOURCE_WALLET", ""),
     # Safety
     "min_arb_spread":  float(os.environ.get("MIN_ARB_SPREAD", "0.5")),
-    "paper_trading":   os.environ.get("PAPER_TRADING", "true").lower() == "true",
+    "paper_trading":   os.environ.get("PAPER_TRADING", "true").lower() != "false",
 }
 
 # ── Bot State ─────────────────────────────────────────────────────────────────
@@ -515,23 +515,51 @@ SOL_DEX_POOLS = {
 def get_dex_price_via_jupiter(token, dex_name):
     """Get price from specific DEX by routing through Jupiter with dex filter"""
     try:
+        usdc_mint = SOL_TOKENS.get("USDC","EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+        token_mint = SOL_TOKENS.get(token, "")
+        if not token_mint:
+            return 0.0
         params = {
-            "inputMint":  SOL_TOKENS.get("USDC","EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
-            "outputMint": SOL_TOKENS.get(token, SOL_TOKENS.get("SOL","")),
+            "inputMint":  usdc_mint,
+            "outputMint": token_mint,
             "amount":     "1000000",
-            "slippageBps":"10",
+            "slippageBps":"50",
             "dexes":      dex_name,
         }
-        r = requests.get(JUPITER_API+"/quote", params=params, timeout=8)
+        r = requests.get(JUPITER_API+"/quote", params=params, timeout=10)
+        if r.status_code != 200:
+            log("Jupiter "+dex_name+" HTTP "+str(r.status_code)+" for "+token, "WARN")
+            return 0.0
         data = r.json()
+        if "error" in data:
+            log("Jupiter "+dex_name+" error: "+str(data.get("error",""))[:60], "WARN")
+            return 0.0
         out = int(data.get("outAmount", 0))
         if out > 0:
             decimals = 9 if token == "SOL" else 8
             tokens_per_usdc = out / (10**decimals)
-            return 1.0 / tokens_per_usdc if tokens_per_usdc > 0 else 0.0
+            price = 1.0 / tokens_per_usdc if tokens_per_usdc > 0 else 0.0
+            return price
         return 0.0
-    except:
+    except Exception as ex:
+        log("Jupiter "+dex_name+" exception: "+str(ex)[:60], "WARN")
         return 0.0
+
+def get_jupiter_best_price(token):
+    """Get best overall price from Jupiter across all DEXes"""
+    try:
+        usdc_mint  = SOL_TOKENS.get("USDC","EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+        token_mint = SOL_TOKENS.get(token, "")
+        if not token_mint: return 0.0
+        params = {"inputMint":usdc_mint,"outputMint":token_mint,"amount":"1000000","slippageBps":"50"}
+        r = requests.get(JUPITER_API+"/quote", params=params, timeout=10)
+        data = r.json()
+        out = int(data.get("outAmount", 0))
+        if out > 0:
+            decimals = 9 if token == "SOL" else 8
+            return 1.0 / (out / (10**decimals))
+        return 0.0
+    except: return 0.0
 
 def get_evm_dex_price(chain, pair):
     """Get on-chain DEX price via 0x API for EVM chains"""
@@ -562,12 +590,18 @@ def scan_arbitrage():
         for pair in sol_pairs:
             token = pair.split("/")[0]
             prices = {}
+            # Try each DEX individually via Jupiter filter
             for dex in dex_names:
                 p = get_dex_price_via_jupiter(token, dex)
                 if p > 0:
                     prices[dex] = p
+            # Add Jupiter best price as baseline comparison
+            p_jup = get_jupiter_best_price(token)
+            if p_jup > 0: prices["Jupiter-All"] = p_jup
             if prices:
-                log("SOL DEX prices "+pair+": "+str({k:round(v,4) for k,v in prices.items()}))
+                log("SOL ARB scan "+pair+": "+str({k:round(v,4) for k,v in prices.items()}))
+            else:
+                log("SOL ARB scan "+pair+": no DEX prices returned", "WARN")
             if len(prices) >= 2:
                 vals = list(prices.items())
                 for i in range(len(vals)):
@@ -833,7 +867,8 @@ def run_copy():
 
 def run_arbitrage():
     mode = "PAPER" if state["paper_trading"] else "LIVE"
-    log("Arbitrage started ["+mode+" MODE] — min spread: "+str(cfg["min_arb_spread"])+"%")
+    chain = state.get("chain","ethereum")
+    log("Arbitrage started ["+mode+" MODE] on "+chain+" — min spread: "+str(cfg["min_arb_spread"])+"%")
     while state["running"] and state["strategy"]=="arb":
         opps = scan_arbitrage()
         for opp in opps:
@@ -841,7 +876,7 @@ def run_arbitrage():
             if opp["executable"]:
                 log("ARB opportunity: "+opp["pair"]+" spread "+str(opp["spread_pct"])+"% est profit $"+str(opp["est_profit_usd"]))
                 execute_arbitrage(opp)
-                time.sleep(5)  # small delay between trades
+                time.sleep(5)
         time.sleep(30)
 
 STRATEGIES = {"dca":run_dca,"grid":run_grid,"scalp":run_scalp,"copy":run_copy,"arb":run_arbitrage}
