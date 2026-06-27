@@ -504,7 +504,15 @@ def jupiter_swap(from_token, to_token, amount_usd, price):
     to_mint       = SOL_TOKENS.get(to_token, SOL_TOKENS["SOL"])
     amount_tokens = round(amount_usd / price, 6) if price > 0 else 0
     side          = "SOL-BUY" if from_token == "USDC" else "SOL-SELL"
-    lamports      = int(amount_usd * 1e6)  # USDC has 6 decimals
+    # Calculate input amount in correct decimals for the from_token
+    TOKEN_DECIMALS = {"USDC": 6, "USDT": 6, "SOL": 9, "ETH": 8, "JUP": 6, "BONK": 5, "WIF": 6}
+    from_decimals = TOKEN_DECIMALS.get(from_token, 6)
+    if from_token == "USDC" or from_token == "USDT":
+        # amount_usd IS the token amount for stablecoins
+        lamports = int(amount_usd * (10 ** from_decimals))
+    else:
+        # For non-stables, amount_usd is actually token quantity passed in
+        lamports = int(amount_usd * (10 ** from_decimals))
 
     # Get quote — try Raydium first (confirmed works from Render), Jupiter as fallback
     quote = raydium_get_quote(from_mint, to_mint, lamports)
@@ -924,16 +932,37 @@ def execute_arbitrage(opp):
         return True
     else:
         if chain == "solana":
-            log("Executing Solana ARB: BUY on "+buy_from+" SELL on "+sell_on)
-            result = jupiter_swap("USDC", token, size, price)
-            if result:
-                record_trade("ARB via "+buy_from+"->"+sell_on, price, amt, round(est_profit,2))
-            return result
+            log("Executing Solana ARB: BUY "+token+" on "+buy_from+" @ $"+str(price))
+            # Leg 1: Buy token with USDC
+            buy_result = jupiter_swap("USDC", token, size, price)
+            if not buy_result:
+                log("ARB buy leg failed", "WARN")
+                return False
+
+            # Wait briefly for buy confirmation
+            time.sleep(3)
+
+            # Leg 2: Sell token back to USDC at higher price
+            sell_price   = opp["sell_price"]
+            token_amount = round(size / price, 6)
+            sell_usd     = round(token_amount * sell_price, 4)
+            log("Executing Solana ARB: SELL "+str(token_amount)+" "+token+" on "+sell_on+" @ $"+str(sell_price))
+            sell_result = jupiter_swap(token, "USDC", sell_usd, sell_price)
+            if sell_result:
+                actual_profit = round((sell_price - price) * token_amount - opp["est_gas_usd"], 6)
+                state["pnl"] += actual_profit
+                record_trade("ARB "+buy_from+"→"+sell_on, price, token_amount, round(actual_profit, 4))
+                log("Solana ARB complete — profit: $"+str(actual_profit))
+                return True
+            else:
+                log("ARB sell leg failed — holding "+str(token_amount)+" "+token, "WARN")
+                record_trade("ARB-BUY-ONLY (sell failed)", price, token_amount, None)
+                return False
         else:
             result = place_order(pair, "buy", amt)
             if result:
                 record_trade("ARB via "+buy_from+"->"+sell_on, price, amt, round(est_profit,2))
-                log("EVM ARB executed @ $"+str(price))
+                log("EVM ARB executed @ $"+str(price)+" profit est: $"+str(est_profit))
                 return True
     return False
 
