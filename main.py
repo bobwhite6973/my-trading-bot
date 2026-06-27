@@ -595,7 +595,7 @@ def scan_arbitrage():
                 usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
                 token_mints = {
                     "SOL": sol_mint,
-                    "BTC": "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
+                    "BTC": "EZakNDRfiCueEiwQmy12MUeH9u4YpDnC1QLSHqUCRJMJ",
                     "ETH": "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
                 }
                 in_mint = token_mints.get(token_symbol, sol_mint)
@@ -621,48 +621,58 @@ def scan_arbitrage():
         def get_orca_pool_price(token_symbol):
             """Get price from Orca whirlpool API"""
             try:
-                token_mints = {
-                    "SOL": "So11111111111111111111111111111111111111112",
-                    "BTC": "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
-                    "ETH": "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
+                # Orca whirlpool pool addresses for SOL/USDC and others
+                # These are the top pools by TVL
+                pool_ids = {
+                    "SOL": "HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ",  # SOL/USDC Whirlpool
+                    "ETH": "FpCMFDFGYotvufJ7HrFHsWEiiQCGbkLCtwHiDnh7o28Q",  # ETH/USDC Whirlpool
                 }
-                mint = token_mints.get(token_symbol,"")
-                if not mint: return 0.0
+                pool = pool_ids.get(token_symbol,"")
+                if not pool: return 0.0
                 r = requests.get(
-                    "https://api.mainnet.orca.so/v1/token/"+mint,
+                    "https://api.mainnet.orca.so/v1/whirlpool/"+pool,
                     timeout=10
                 )
                 if r.status_code != 200:
-                    log("Orca API status: "+str(r.status_code),"WARN")
+                    log("Orca API status: "+str(r.status_code)+" for "+token_symbol,"WARN")
                     return 0.0
                 data = r.json()
                 price = float(data.get("price", 0))
+                if price > 0:
+                    log("Orca "+token_symbol+"/USDC: $"+str(round(price,4)))
                 return price
             except Exception as ex:
                 log("Orca API error: "+str(ex)[:60], "WARN")
                 return 0.0
 
         def get_meteora_pool_price(token_symbol):
-            """Get price from Meteora DLMM API"""
+            """Get price from Meteora via search API"""
             try:
-                # Search for top SOL/USDC pool by volume
+                search = token_symbol+"-USDC"
                 r = requests.get(
-                    "https://dlmm-api.meteora.ag/pair/all_with_pagination",
-                    params={"search_term": token_symbol+"-USDC", "limit": 5, "sort_key": "tvl", "order_by": "desc"},
-                    timeout=10
+                    "https://dlmm-api.meteora.ag/pair/all",
+                    params={"search_term": search, "limit": 10},
+                    timeout=15
                 )
                 if r.status_code != 200:
                     log("Meteora API status: "+str(r.status_code),"WARN")
                     return 0.0
-                data = r.json()
-                pools = data.get("pairs", data if isinstance(data, list) else [])
-                for pool in pools:
-                    name = pool.get("name","")
+                pools = r.json()
+                pool_list = pools if isinstance(pools, list) else pools.get("pairs", pools.get("data", []))
+                # Find highest TVL pool matching the pair
+                best_price = 0.0
+                best_tvl = 0.0
+                for p in pool_list[:20]:
+                    name = p.get("name","")
                     if token_symbol.upper() in name and "USDC" in name:
-                        price = float(pool.get("current_price", 0))
-                        if price > 0:
-                            return price
-                return 0.0
+                        tvl = float(p.get("tvl", p.get("liquidity", 0)))
+                        price = float(p.get("current_price", 0))
+                        if price > 0 and tvl > best_tvl:
+                            best_price = price
+                            best_tvl = tvl
+                if best_price > 0:
+                    log("Meteora "+token_symbol+"/USDC: $"+str(round(best_price,4))+" TVL=$"+str(round(best_tvl,0)))
+                return best_price
             except Exception as ex:
                 log("Meteora API error: "+str(ex)[:60], "WARN")
                 return 0.0
