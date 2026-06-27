@@ -566,11 +566,17 @@ def jupiter_swap(from_token, to_token, amount_usd, price):
                 headers={"Content-Type": "application/json"},
                 timeout=15
             )
+            log("Raydium TX response status: "+str(r.status_code))
+            log("Raydium TX response body: "+r.text[:200])
             if r.status_code != 200:
                 log("Raydium swap TX error: "+str(r.status_code)+" "+r.text[:100], "WARN")
                 return False
 
-            swap_data   = r.json()
+            try:
+                swap_data = r.json()
+            except Exception as je:
+                log("Raydium TX JSON parse error: "+str(je)+" body: "+r.text[:150], "WARN")
+                return False
             if not swap_data.get("success"):
                 log("Raydium swap TX failed: "+str(swap_data.get("msg",""))[:100], "WARN")
                 return False
