@@ -57,24 +57,35 @@ def lbank_sign(params):
 def get_price(symbol):
     try:
         sym = symbol.replace("/","_").lower()
-        r = requests.get(LBANK_BASE+"/ticker/price.do", params={"symbol": sym}, timeout=5)
+        r = requests.get("https://api.lbank.info/v1/ticker.do", params={"symbol": sym}, timeout=5)
         data = r.json()
-        if data.get("result") == "true":
-            return float(data["data"][0]["price"])
+        if isinstance(data, list) and len(data) > 0:
+            return float(data[0].get("ticker", {}).get("latest", 0))
+        elif isinstance(data, dict):
+            return float(data.get("ticker", {}).get("latest", 0))
     except Exception as ex:
         log("Price fetch error: "+str(ex), "ERROR")
     return 0.0
 
 def get_balance():
     try:
-        params = lbank_sign({"echostr": "test"})
-        r = requests.post(LBANK_BASE+"/supplement/user_info.do", data=params, timeout=5)
+        timestamp = str(int(time.time() * 1000))
+        params = {
+            "api_key": cfg["api_key"],
+            "timestamp": timestamp,
+        }
+        query = "&".join(k+"="+str(v) for k,v in sorted(params.items()))
+        sign = hmac.new(cfg["api_secret"].encode(), query.encode(), hashlib.md5).hexdigest().upper()
+        params["sign"] = sign
+        r = requests.post("https://api.lbank.info/v1/user_info.do", data=params, timeout=5)
         data = r.json()
         if data.get("result") == "true":
-            info = data.get("data", {}).get("info", {}).get("free", {})
+            info = data.get("info", {}).get("free", {})
             usdt = float(info.get("usdt", 0))
             state["balance"] = usdt
             return usdt
+        else:
+            log("Balance error: "+str(data.get("error_code","")), "ERROR")
     except Exception as ex:
         log("Balance fetch error: "+str(ex), "ERROR")
     return 0.0
