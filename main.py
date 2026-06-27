@@ -472,31 +472,108 @@ def jupiter_get_quote(from_mint, to_mint, amount_lamports):
     return None
 
 def jupiter_swap(from_token, to_token, amount_usd, price):
-    """Execute swap via Jupiter — paper trade if PAPER_TRADING=true"""
-    token_name = to_token if from_token == "USDC" else from_token
-    amount_tokens = round(amount_usd / price, 6)
-    side = "SOL-BUY" if from_token == "USDC" else "SOL-SELL"
+    """Execute swap via Jupiter — paper trade if PAPER_TRADING=true, live swap if false"""
+    from_mint     = SOL_TOKENS.get(from_token, SOL_TOKENS["USDC"])
+    to_mint       = SOL_TOKENS.get(to_token, SOL_TOKENS["SOL"])
+    amount_tokens = round(amount_usd / price, 6) if price > 0 else 0
+    side          = "SOL-BUY" if from_token == "USDC" else "SOL-SELL"
+    lamports      = int(amount_usd * 1e6)  # USDC has 6 decimals
 
-    # Get quote first
-    from_mint = SOL_TOKENS.get(from_token, SOL_TOKENS["USDC"])
-    to_mint   = SOL_TOKENS.get(to_token, SOL_TOKENS["SOL"])
-    lamports  = int(amount_usd * 1e6)
-    quote     = jupiter_get_quote(from_mint, to_mint, lamports)
-
+    # Get quote first regardless of paper/live
+    quote = jupiter_get_quote(from_mint, to_mint, lamports)
     if quote:
         out_amount = int(quote.get("outAmount", 0))
-        log("Jupiter quote: "+str(amount_usd)+" "+from_token+" → "+str(out_amount/1e9)+" "+to_token+" via "+str(len(quote.get("routePlan",[])))+" hops")
+        log("Jupiter quote: $"+str(amount_usd)+" "+from_token+" → "+str(out_amount)+" "+to_token+" lamports")
+    else:
+        log("Jupiter quote failed for "+from_token+"→"+to_token, "WARN")
+        return False
 
     if state["paper_trading"]:
-        log("[PAPER] SOL swap: "+str(amount_usd)+" "+from_token+" → "+str(amount_tokens)+" "+to_token+" @ $"+str(price)+" via Jupiter")
+        log("[PAPER] SOL swap: "+str(amount_usd)+" "+from_token+" → "+str(amount_tokens)+" "+to_token+" @ $"+str(price))
         trade = {"time":time.strftime("%H:%M:%S"),"side":"[PAPER] "+side,"price":price,"amount":amount_tokens,"router":"Jupiter","chain":"solana"}
         state["trades"].append(trade)
         state["positions"].append({"price":price,"amount":amount_tokens,"side":"buy","router":"Jupiter","chain":"solana","strategy":"SOL"})
         return True
+
     else:
-        log("Live Solana swap — requires solana-py and signed transaction")
-        # In production: use solana-py to sign and send the Jupiter swap transaction
-        return False
+        # Live execution via Jupiter swap API + solana-py signing
+        try:
+            from solders.keypair import Keypair
+            from solders.transaction import VersionedTransaction
+            import base64 as b64
+
+            private_key = cfg.get("sol_key","")
+            wallet      = cfg.get("sol_wallet","")
+            if not private_key or not wallet:
+                log("SOL_PRIVATE_KEY or SOL_WALLET_ADDRESS not set — cannot execute live swap", "WARN")
+                return False
+
+            # Decode private key (base58 or bytes array)
+            try:
+                import base58
+                key_bytes = base58.b58decode(private_key)
+            except:
+                key_bytes = bytes(json.loads(private_key))
+
+            keypair = Keypair.from_bytes(key_bytes)
+
+            # Get swap transaction from Jupiter
+            swap_payload = {
+                "quoteResponse": quote,
+                "userPublicKey":  wallet,
+                "wrapAndUnwrapSol": True,
+                "dynamicComputeUnitLimit": True,
+                "prioritizationFeeLamports": 1000,
+            }
+            r = requests.post(
+                JUPITER_API+"/swap",
+                json=swap_payload,
+                headers={"Content-Type": "application/json"},
+                timeout=15
+            )
+            if r.status_code != 200:
+                log("Jupiter swap API error: "+str(r.status_code)+" "+r.text[:100], "WARN")
+                return False
+
+            swap_data    = r.json()
+            swap_tx_b64  = swap_data.get("swapTransaction","")
+            if not swap_tx_b64:
+                log("No swap transaction returned from Jupiter", "WARN")
+                return False
+
+            # Deserialize, sign, and send transaction
+            raw_tx   = b64.b64decode(swap_tx_b64)
+            tx       = VersionedTransaction.from_bytes(raw_tx)
+            signed   = keypair.sign_message(bytes(tx.message))
+
+            # Send via Solana RPC
+            send_payload = {
+                "jsonrpc": "2.0", "id": 1,
+                "method": "sendTransaction",
+                "params": [
+                    b64.b64encode(bytes(tx)).decode(),
+                    {"encoding": "base64", "skipPreflight": False, "preflightCommitment": "confirmed"}
+                ]
+            }
+            r2 = requests.post(SOL_RPC, json=send_payload, timeout=15)
+            result = r2.json()
+            tx_sig = result.get("result","")
+            if tx_sig:
+                log("LIVE SWAP EXECUTED: "+tx_sig[:20]+"... "+from_token+"→"+to_token+" $"+str(amount_usd))
+                trade = {"time":time.strftime("%H:%M:%S"),"side":"LIVE-"+side,"price":price,"amount":amount_tokens,"router":"Jupiter","chain":"solana","tx":tx_sig[:20]}
+                state["trades"].append(trade)
+                return True
+            else:
+                err = result.get("error",{})
+                log("Swap send failed: "+str(err)[:100], "WARN")
+                return False
+
+        except ImportError as ie:
+            log("Missing package: "+str(ie)+" — ensure solders and solana are in requirements.txt", "WARN")
+            return False
+        except Exception as ex:
+            log("Live swap error: "+str(ex)[:100], "WARN")
+            return False
 def get_jupiter_price(token):
     try:
         mint = SOL_TOKENS.get(token)
