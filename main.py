@@ -33,7 +33,7 @@ cfg = {
     "max_loss":     float(os.environ.get("MAX_DAILY_LOSS_USD", "200")),
     "source_wallet":os.environ.get("SOURCE_WALLET", ""),
     # Safety
-    "min_arb_spread":  float(os.environ.get("MIN_ARB_SPREAD", "0.5")),
+    "min_arb_spread":  float(os.environ.get("MIN_ARB_SPREAD", "1.5")),
     "paper_trading":   os.environ.get("PAPER_TRADING", "true").lower() != "false",
 }
 
@@ -58,6 +58,8 @@ state = {
     "error":         None,
     "arb_opps":      [],
     "paper_trading": cfg["paper_trading"],
+    "trading_lock":  False,   # Prevent simultaneous trades
+    "last_trade_time": 0,     # Cooldown between trades
 }
 
 def log(msg, level="INFO"):
@@ -411,7 +413,10 @@ def start_background_loops():
 
 # ── Solana ────────────────────────────────────────────────────────────────────
 SOL_RPC = "https://api.mainnet-beta.solana.com"
-JUPITER_API = "https://quote-api.jup.ag/v6"
+# Jupiter API — use lite-api.jup.ag (new endpoint, requires API key after June 2026)
+# Set JUPITER_API_KEY in Render env vars from dev.jup.ag
+JUPITER_API     = "https://quote-api.jup.ag/v6"
+JUPITER_API_KEY = os.environ.get("JUPITER_API_KEY", "")
 
 # Solana token mints
 SOL_TOKENS = {
@@ -428,31 +433,48 @@ SOL_TOKENS = {
 }
 
 def sol_get_balance():
+    """Get SOL + USDC balance. Tries multiple RPC endpoints for reliability."""
+    SOL_RPCS = [SOL_RPC, "https://rpc.ankr.com/solana"]
+    if ALCHEMY_KEY:
+        SOL_RPCS = ["https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY] + SOL_RPCS
+
+    wallet = cfg["sol_wallet"]
+    if not wallet:
+        return 0.0
+
+    def rpc_call(method, params):
+        payload = {"jsonrpc":"2.0","id":1,"method":method,"params":params}
+        for rpc in SOL_RPCS:
+            try:
+                r = requests.post(rpc, json=payload, timeout=8)
+                result = r.json()
+                if "result" in result:
+                    return result["result"]
+            except:
+                continue
+        return None
+
     try:
-        wallet = cfg["sol_wallet"]
-        if not wallet:
-            return 0.0
-        # Get SOL balance
-        payload = {"jsonrpc":"2.0","id":1,"method":"getBalance","params":[wallet]}
-        r = requests.post(SOL_RPC, json=payload, timeout=8)
-        data = r.json()
-        sol_amt = data.get("result",{}).get("value",0) / 1e9
+        # Get SOL native balance
+        sol_raw = rpc_call("getBalance", [wallet])
+        sol_amt = (sol_raw.get("value", 0) / 1e9) if isinstance(sol_raw, dict) else 0.0
         sol_price = get_price_kraken("SOL/USDT") or get_price_coingecko("SOL/USDT") or 150
-        # Get USDC balance via token account
-        usdc_payload = {
-            "jsonrpc":"2.0","id":1,"method":"getTokenAccountsByOwner",
-            "params":[wallet,{"mint":SOL_TOKENS["USDC"]},{"encoding":"jsonParsed"}]
-        }
-        r2 = requests.post(SOL_RPC, json=usdc_payload, timeout=8)
-        data2 = r2.json()
+
+        # Get USDC token balance
+        usdc_raw = rpc_call("getTokenAccountsByOwner",
+            [wallet, {"mint": SOL_TOKENS["USDC"]}, {"encoding": "jsonParsed"}])
         usdc = 0.0
-        accounts = data2.get("result",{}).get("value",[])
-        if accounts:
-            usdc = float(accounts[0].get("account",{}).get("data",{}).get("parsed",{}).get("info",{}).get("tokenAmount",{}).get("uiAmount",0) or 0)
+        if usdc_raw and usdc_raw.get("value"):
+            usdc = float(
+                usdc_raw["value"][0]
+                .get("account",{}).get("data",{}).get("parsed",{})
+                .get("info",{}).get("tokenAmount",{}).get("uiAmount", 0) or 0
+            )
+
         total_usd = round(sol_amt * sol_price + usdc, 2)
         state["sol_balance"] = total_usd
-        state["sol_usdc"] = usdc  # Track USDC separately for trading
-        state["sol_native"] = round(sol_amt * sol_price, 2)  # SOL value only
+        state["sol_usdc"]    = usdc
+        state["sol_native"]  = round(sol_amt * sol_price, 2)
         log("Solana balance: "+str(round(sol_amt,4))+" SOL + $"+str(round(usdc,2))+" USDC = $"+str(total_usd))
         return total_usd
     except Exception as ex:
@@ -475,260 +497,288 @@ def jupiter_get_quote(from_mint, to_mint, amount_lamports):
     return None
 
 def raydium_get_quote(from_mint, to_mint, amount, slippage_bps="200"):
-    """Get swap quote from Raydium Trade API - confirmed real endpoint"""
-    try:
-        r = requests.get(
-            "https://transaction-v1.raydium.io/compute/swap-base-in",
-            params={
-                "inputMint":   from_mint,
-                "outputMint":  to_mint,
-                "amount":      str(amount),
-                "slippageBps": slippage_bps,
-                "txVersion":   "V0",
-            },
-            timeout=10
-        )
-        if r.status_code != 200:
-            log("Raydium quote status: "+str(r.status_code), "WARN")
-            return None
-        data = r.json()
-        if not data.get("success"):
-            log("Raydium quote failed: "+str(data.get("msg","")), "WARN")
-            return None
-        # Return full response — swapResponse field needs the complete object
-        log("Raydium quote data keys: "+str(list(data.get("data",{}).keys()))[:80])
-        return data
-    except Exception as ex:
-        log("Raydium quote error: "+str(ex)[:80], "ERROR")
+    """
+    Get swap quote from Raydium Trade API.
+    Confirmed endpoint: transaction-v1.raydium.io/compute/swap-base-in
+    Returns full response object — swapResponse in the TX payload needs the complete object.
+    Handles 429 with Retry-After backoff.
+    """
+    for attempt in range(3):
+        try:
+            r = requests.get(
+                "https://transaction-v1.raydium.io/compute/swap-base-in",
+                params={
+                    "inputMint":   from_mint,
+                    "outputMint":  to_mint,
+                    "amount":      str(amount),
+                    "slippageBps": slippage_bps,
+                    "txVersion":   "V0",
+                },
+                timeout=10
+            )
+            if r.status_code == 429:
+                wait = int(r.headers.get("Retry-After", 5))
+                log("Raydium quote 429 — waiting "+str(wait)+"s", "WARN")
+                time.sleep(wait)
+                continue
+            if r.status_code != 200:
+                log("Raydium quote status: "+str(r.status_code), "WARN")
+                return None
+            data = r.json()
+            if not data.get("success"):
+                log("Raydium quote failed: "+str(data.get("msg","")), "WARN")
+                return None
+            return data  # Full response needed by transaction endpoint
+        except Exception as ex:
+            log("Raydium quote error (attempt "+str(attempt+1)+"): "+str(ex)[:80], "WARN")
+            time.sleep(2)
     return None
 
-def jupiter_swap(from_token, to_token, amount_usd, price):
-    """Execute swap via Jupiter — paper trade if PAPER_TRADING=true, live swap if false"""
-    from_mint     = SOL_TOKENS.get(from_token, SOL_TOKENS["USDC"])
-    to_mint       = SOL_TOKENS.get(to_token, SOL_TOKENS["SOL"])
-    side          = "SOL-BUY" if from_token == "USDC" else "SOL-SELL"
-    # For buys: amount_usd is USD value, calculate tokens from price
-    # For sells: amount_usd IS the token quantity already
-    if from_token in ("USDC","USDT"):
-        amount_tokens = round(amount_usd / price, 6) if price > 0 else 0
-    else:
-        amount_tokens = amount_usd  # already in token units
-    # Calculate input amount in correct decimals for the from_token
+def jupiter_swap(from_token, to_token, amount_input, price, dex=None):
+    """
+    Execute a Solana DEX swap via Raydium Trade API.
+    - from_token/to_token: token symbols e.g. "USDC", "BONK"
+    - amount_input: USDC value for stablecoin buys; token quantity for token sells
+    - price: current price of output token in USDC (for display/logging)
+    - dex: optional DEX name hint for logging ("Raydium", "Orca", "Meteora")
+    Returns (success: bool, out_amount_human: float)
+    """
     TOKEN_DECIMALS = {"USDC": 6, "USDT": 6, "SOL": 9, "ETH": 8, "JUP": 6, "BONK": 5, "WIF": 6}
-    from_decimals = TOKEN_DECIMALS.get(from_token, 6)
-    if from_token in ("USDC", "USDT"):
-        # amount_usd is a dollar value — convert to token units
-        lamports = int(amount_usd * (10 ** from_decimals))
-    else:
-        # amount_usd is a token quantity (e.g. 714000 BONK) — convert to lamports
-        lamports = int(amount_usd * (10 ** from_decimals))
-    log("Swap input: "+str(amount_usd)+" "+from_token+" = "+str(lamports)+" lamports ("+str(from_decimals)+" decimals)")
+    from_mint = SOL_TOKENS.get(from_token, SOL_TOKENS["USDC"])
+    to_mint   = SOL_TOKENS.get(to_token,   SOL_TOKENS["SOL"])
+    from_dec  = TOKEN_DECIMALS.get(from_token, 6)
+    to_dec    = TOKEN_DECIMALS.get(to_token,   9)
+    side      = "BUY" if from_token in ("USDC","USDT") else "SELL"
+    via       = (" via "+dex) if dex else ""
 
-    # Get quote — try Raydium first (confirmed works from Render), Jupiter as fallback
-    # Use higher slippage for sells to account for price movement
-    slippage = "100" if from_token in ("USDC","USDT") else "300"
-    quote = raydium_get_quote(from_mint, to_mint, lamports, slippage)
-    router = "Raydium"
-    if quote:
-        out_amount = int(quote.get("data",{}).get("outputAmount", quote.get("data",{}).get("outAmount", 0)))
-        log("Raydium quote: $"+str(amount_usd)+" "+from_token+" → "+str(out_amount)+" "+to_token+" units")
-    else:
-        log("Raydium quote failed, trying Jupiter...", "WARN")
-        quote = jupiter_get_quote(from_mint, to_mint, lamports)
-        router = "Jupiter"
-        if quote:
-            out_amount = int(quote.get("outAmount", 0))
-            log("Jupiter quote: $"+str(amount_usd)+" "+from_token+" → "+str(out_amount)+" "+to_token+" units")
-        else:
-            log("Both Raydium and Jupiter quotes failed for "+from_token+"→"+to_token, "WARN")
-            return False
+    lamports = int(amount_input * (10 ** from_dec))
+    log("Swap "+side+via+": "+str(amount_input)+" "+from_token+" → "+to_token)
+
+    # Get execution quote from Raydium (confirmed accessible from Render)
+    slippage = "100" if side == "BUY" else "300"
+    quote    = raydium_get_quote(from_mint, to_mint, lamports, slippage)
+    if not quote:
+        log("Raydium quote failed — swap aborted", "WARN")
+        return False, 0.0
+
+    out_lamports = int(quote.get("data",{}).get("outputAmount", 0))
+    out_human    = out_lamports / (10 ** to_dec) if out_lamports > 0 else 0.0
+    log("Quote: "+str(amount_input)+" "+from_token+" → "+str(round(out_human,6))+" "+to_token)
 
     if state["paper_trading"]:
-        log("[PAPER] SOL swap: "+str(amount_usd)+" "+from_token+" → "+str(amount_tokens)+" "+to_token+" @ $"+str(price))
-        trade = {"time":time.strftime("%H:%M:%S"),"side":"[PAPER] "+side,"price":price,"amount":amount_tokens,"router":"Jupiter","chain":"solana"}
+        trade = {"time":time.strftime("%H:%M:%S"),"side":"[PAPER] "+side+via,
+                 "price":price,"amount":out_human,"router":"Raydium","chain":"solana"}
         state["trades"].append(trade)
-        state["positions"].append({"price":price,"amount":amount_tokens,"side":"buy","router":"Jupiter","chain":"solana","strategy":"SOL"})
-        return True
+        return True, out_human
 
-    else:
-        # Live execution via Jupiter swap API + solana-py signing
+    # ── Live execution ────────────────────────────────────────────────────────
+    try:
+        from solders.keypair import Keypair
+        from solders.transaction import VersionedTransaction
+        from solders import message as solders_message
+        import base64 as b64
+
+        private_key = cfg.get("sol_key","")
+        wallet      = cfg.get("sol_wallet","")
+        if not private_key or not wallet:
+            log("SOL_PRIVATE_KEY or SOL_WALLET_ADDRESS not set", "WARN")
+            return False, 0.0
+
         try:
-            from solders.keypair import Keypair
-            from solders.transaction import VersionedTransaction
-            import base64 as b64
+            keypair = Keypair.from_base58_string(private_key)
+        except Exception as ke:
+            log("Key decode failed: "+str(ke)[:60], "WARN")
+            return False, 0.0
 
-            private_key = cfg.get("sol_key","")
-            wallet      = cfg.get("sol_wallet","")
-            if not private_key or not wallet:
-                log("SOL_PRIVATE_KEY or SOL_WALLET_ADDRESS not set — cannot execute live swap", "WARN")
-                return False
-
-            # Decode private key using solders built-in (no base58 package needed)
-            # Phantom exports as base58 string - solders Keypair.from_base58_string handles this
-            try:
-                keypair = Keypair.from_base58_string(private_key)
-                log("Private key decoded successfully")
-            except Exception as k_err:
-                log("Keypair from base58 failed: "+str(k_err)[:80]+", trying bytes array", "WARN")
+        # ── ATA lookup with multi-RPC fallback ───────────────────────────────
+        def get_ata(wallet_addr, mint_addr):
+            """Look up Associated Token Account across multiple RPCs."""
+            rpcs = [SOL_RPC, "https://rpc.ankr.com/solana"]
+            if ALCHEMY_KEY:
+                rpcs = ["https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY] + rpcs
+            payload = {
+                "jsonrpc":"2.0","id":1,
+                "method":"getTokenAccountsByOwner",
+                "params":[wallet_addr, {"mint":mint_addr}, {"encoding":"jsonParsed"}]
+            }
+            for rpc in rpcs:
                 try:
-                    keypair = Keypair.from_bytes(bytes(json.loads(private_key)))
-                    log("Private key decoded from JSON array")
-                except Exception as k_err2:
-                    log("Private key decode failed: "+str(k_err2)[:80], "WARN")
-                    return False
-
-            # Get swap transaction from Raydium
-            # Get token accounts via Solana RPC
-            def get_ata(wallet_addr, mint_addr):
-                try:
-                    payload = {
-                        "jsonrpc": "2.0", "id": 1,
-                        "method": "getTokenAccountsByOwner",
-                        "params": [wallet_addr, {"mint": mint_addr}, {"encoding": "jsonParsed"}]
-                    }
-                    r = requests.post(SOL_RPC, json=payload, timeout=8)
-                    accounts = r.json().get("result",{}).get("value",[])
-                    if accounts:
-                        return accounts[0].get("pubkey","")
-                    return None
+                    r = requests.post(rpc, json=payload, timeout=8)
+                    accs = r.json().get("result",{}).get("value",[])
+                    if accs:
+                        return accs[0].get("pubkey")
                 except:
+                    continue
+            return None
+
+        # ── ATA creation if missing ───────────────────────────────────────────
+        def create_ata_if_missing(keypair, wallet_addr, mint_addr):
+            """
+            Create Associated Token Account on-chain if it doesn't exist.
+            Uses Solana's Associated Token Program via raw RPC instruction.
+            Cost: ~0.002 SOL. Only needed once per token.
+            """
+            existing = get_ata(wallet_addr, mint_addr)
+            if existing:
+                return existing
+
+            log("Creating ATA for mint "+mint_addr[:8]+"...", "WARN")
+            try:
+                from solders.pubkey import Pubkey
+                import struct
+
+                # Derive ATA address
+                wallet_pk  = Pubkey.from_string(wallet_addr)
+                mint_pk    = Pubkey.from_string(mint_addr)
+                token_prog = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+                ata_prog   = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bsU")
+                sys_prog   = Pubkey.from_string("11111111111111111111111111111111")
+
+                # Derive ATA PDA
+                seeds = [bytes(wallet_pk), bytes(token_prog), bytes(mint_pk)]
+                ata_pk, _ = Pubkey.find_program_address(seeds, ata_prog)
+
+                # Get recent blockhash
+                bh_payload = {"jsonrpc":"2.0","id":1,"method":"getLatestBlockhash","params":[{"commitment":"confirmed"}]}
+                bh_r = requests.post(SOL_RPC, json=bh_payload, timeout=8)
+                blockhash_str = bh_r.json().get("result",{}).get("value",{}).get("blockhash","")
+                if not blockhash_str:
+                    log("Could not get blockhash for ATA creation", "WARN")
                     return None
 
-            input_account  = get_ata(wallet, from_mint) if from_token != "SOL" else None
-            output_account = get_ata(wallet, to_mint)   if to_token  != "SOL" else None
-            log("Input ATA: "+str(input_account)+" Output ATA: "+str(output_account))
+                from solders.hash import Hash
+                from solders.instruction import AccountMeta, Instruction
+                from solders.message import MessageV0
+                from solders.transaction import VersionedTransaction as VT
 
-            # Raydium transaction endpoint expects the compute response directly
-            swap_payload = {
-                "computeUnitPriceMicroLamports": "10000",
-                "swapResponse": quote,
-                "txVersion":    "V0",
-                "wallet":       wallet,
-                "wrapSol":      from_token == "SOL",
-                "unwrapSol":    to_token == "SOL",
-                "inputAccount":  input_account  if input_account  else None,
-                "outputAccount": output_account if output_account else None,
-            }
-            log("Swap payload swapResponse type: "+str(type(quote).__name__)+" keys: "+str(list(quote.keys()) if isinstance(quote,dict) else "not dict")[:80])
-            r = requests.post(
-                "https://transaction-v1.raydium.io/transaction/swap-base-in",
-                json=swap_payload,
-                headers={"Content-Type": "application/json"},
-                timeout=15
-            )
-            log("Raydium TX response status: "+str(r.status_code))
-            log("Raydium TX response body: "+r.text[:200])
-            if r.status_code != 200:
-                log("Raydium swap TX error: "+str(r.status_code)+" "+r.text[:100], "WARN")
-                return False
+                blockhash = Hash.from_string(blockhash_str)
 
-            try:
-                swap_data = r.json()
-            except Exception as je:
-                log("Raydium TX JSON parse error: "+str(je)+" body: "+r.text[:150], "WARN")
-                return False
-            if not swap_data.get("success"):
-                log("Raydium swap TX failed: "+str(swap_data.get("msg",""))[:100], "WARN")
-                return False
+                # Create Associated Token Account instruction
+                create_ix = Instruction(
+                    ata_prog,
+                    bytes([0]),  # CreateIdempotent instruction (safe to retry)
+                    [
+                        AccountMeta(wallet_pk,  True,  True),   # payer
+                        AccountMeta(ata_pk,     False, True),   # ata
+                        AccountMeta(wallet_pk,  False, False),  # owner
+                        AccountMeta(mint_pk,    False, False),  # mint
+                        AccountMeta(sys_prog,   False, False),  # system program
+                        AccountMeta(token_prog, False, False),  # token program
+                    ]
+                )
 
-            txs = swap_data.get("data",[])
-            swap_tx_b64 = txs[0].get("transaction","") if txs else ""
-            if not swap_tx_b64:
-                log("No swap transaction returned from Jupiter", "WARN")
-                return False
+                msg     = MessageV0.try_compile(wallet_pk, [create_ix], [], blockhash)
+                tx      = VT(msg, [keypair])
+                import base64 as b64
+                tx_b64  = b64.b64encode(bytes(tx)).decode()
 
-            # Deserialize, sign, and send versioned transaction
-            from solders import message as solders_message
-            raw_tx      = b64.b64decode(swap_tx_b64)
-            raw_tx_obj  = VersionedTransaction.from_bytes(raw_tx)
+                send_payload = {
+                    "jsonrpc":"2.0","id":1,"method":"sendTransaction",
+                    "params":[tx_b64, {"encoding":"base64","skipPreflight":True,"maxRetries":3}]
+                }
+                send_rpc = ("https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY) if ALCHEMY_KEY else SOL_RPC
+                r2 = requests.post(send_rpc, json=send_payload, timeout=15)
+                result = r2.json()
+                tx_sig = result.get("result","")
+                if tx_sig:
+                    log("ATA created: "+tx_sig[:20]+"... waiting 3s for confirmation")
+                    time.sleep(3)
+                    return str(ata_pk)
+                else:
+                    log("ATA creation failed: "+str(result.get("error",""))[:80], "WARN")
+                    return None
+            except Exception as ex:
+                log("ATA creation error: "+str(ex)[:80], "WARN")
+                return None
 
-            # Correct signing for VersionedTransaction per solders docs
-            signature   = keypair.sign_message(solders_message.to_bytes_versioned(raw_tx_obj.message))
-            signed_tx   = VersionedTransaction.populate(raw_tx_obj.message, [signature])
+        # Get or create ATAs
+        input_ata  = get_ata(wallet, from_mint) if from_token != "SOL" else None
+        output_ata = get_ata(wallet, to_mint)   if to_token  != "SOL" else None
+        log("ATA — input: "+str(input_ata)+" output: "+str(output_ata))
 
-            # Send via Solana RPC — skip preflight to avoid stale blockhash rejection
-            send_payload = {
-                "jsonrpc": "2.0", "id": 1,
-                "method": "sendTransaction",
-                "params": [
-                    b64.b64encode(bytes(signed_tx)).decode(),
-                    {"encoding": "base64", "skipPreflight": True, "preflightCommitment": "confirmed", "maxRetries": 3}
-                ]
-            }
-            r2 = requests.post(SOL_RPC, json=send_payload, timeout=15)
-            result = r2.json()
-            tx_sig = result.get("result","")
-            if tx_sig:
-                log("LIVE SWAP EXECUTED: "+tx_sig[:20]+"... "+from_token+"→"+to_token+" $"+str(amount_usd))
-                trade = {"time":time.strftime("%H:%M:%S"),"side":"LIVE-"+side,"price":price,"amount":amount_tokens,"router":"Jupiter","chain":"solana","tx":tx_sig[:20]}
-                state["trades"].append(trade)
-                return True
-            else:
-                err = result.get("error",{})
-                log("Swap send failed: "+str(err)[:100], "WARN")
-                return False
+        # For non-SOL input: must have ATA to spend from
+        if from_token != "SOL" and not input_ata:
+            log("Input ATA missing for "+from_token+" — swap cannot proceed", "WARN")
+            return False, 0.0
 
-        except ImportError as ie:
-            log("Missing package: "+str(ie)+" — ensure solders and solana are in requirements.txt", "WARN")
-            return False
-        except Exception as ex:
-            log("Live swap error: "+str(ex)[:100], "WARN")
-            return False
-# ── Real Solana DEX price feeds ───────────────────────────────────────────────
-SOL_DEX_POOLS = {
-    "SOL/USDC": {"Raydium":"58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWaS3grPdTHE","Orca":"EGZ7tiLeH62TPV1gL8WwbXGzEPa9zmcpVnnkPKKnrE2U"},
-    "JUP/USDC": {"Raydium":"6kbC5epG18oomfvwbEc2JHLZSdXAKBmEN3JBB8VTmzoB","Orca":"2LecshUwdy9xi7meFgHtFJQNSKk4KdTrcpvaB56dP2NQ"},
-    "ETH/USDC": {"Raydium":"9Lyhks5bQQxb9EyyX55NtgKQzpM4WK7bni5KkWpHGHGP","Orca":"2LecshUwdy9xi7meFgHtFJQNSKk4KdTrcpvaB56dP2NQ"},
-}
+        # For non-SOL output: create ATA if missing (e.g. first time receiving BONK)
+        if to_token != "SOL" and not output_ata:
+            output_ata = create_ata_if_missing(keypair, wallet, to_mint)
+            if not output_ata:
+                log("Could not create output ATA for "+to_token, "WARN")
+                return False, 0.0
 
-def get_dex_price_via_jupiter(token, dex_name):
-    """Get price from specific DEX by routing through Jupiter with dex filter"""
-    try:
-        usdc_mint = SOL_TOKENS.get("USDC","EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
-        token_mint = SOL_TOKENS.get(token, "")
-        if not token_mint:
-            return 0.0
-        params = {
-            "inputMint":  usdc_mint,
-            "outputMint": token_mint,
-            "amount":     "1000000",
-            "slippageBps":"50",
-            "dexes":      dex_name,
+        # Build transaction via Raydium Trade API
+        swap_payload = {
+            "computeUnitPriceMicroLamports": "10000",
+            "swapResponse":  quote,
+            "txVersion":     "V0",
+            "wallet":        wallet,
+            "wrapSol":       from_token == "SOL",
+            "unwrapSol":     to_token   == "SOL",
+            "inputAccount":  input_ata,
+            "outputAccount": output_ata,
         }
-        r = requests.get(JUPITER_API+"/quote", params=params, timeout=10)
+        r = requests.post(
+            "https://transaction-v1.raydium.io/transaction/swap-base-in",
+            json=swap_payload, headers={"Content-Type":"application/json"}, timeout=15
+        )
+        log("Raydium TX: "+str(r.status_code)+" "+r.text[:120])
         if r.status_code != 200:
-            log("Jupiter "+dex_name+" HTTP "+str(r.status_code)+" for "+token, "WARN")
-            return 0.0
-        data = r.json()
-        if "error" in data:
-            log("Jupiter "+dex_name+" error: "+str(data.get("error",""))[:60], "WARN")
-            return 0.0
-        out = int(data.get("outAmount", 0))
-        if out > 0:
-            decimals = 9 if token == "SOL" else 8
-            tokens_per_usdc = out / (10**decimals)
-            price = 1.0 / tokens_per_usdc if tokens_per_usdc > 0 else 0.0
-            return price
-        return 0.0
-    except Exception as ex:
-        log("Jupiter "+dex_name+" exception: "+str(ex)[:60], "WARN")
-        return 0.0
+            return False, 0.0
 
-def get_jupiter_best_price(token):
-    """Get best overall price from Jupiter across all DEXes"""
-    try:
-        usdc_mint  = SOL_TOKENS.get("USDC","EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
-        token_mint = SOL_TOKENS.get(token, "")
-        if not token_mint: return 0.0
-        params = {"inputMint":usdc_mint,"outputMint":token_mint,"amount":"1000000","slippageBps":"50"}
-        r = requests.get(JUPITER_API+"/quote", params=params, timeout=10)
-        data = r.json()
-        out = int(data.get("outAmount", 0))
-        if out > 0:
-            decimals = 9 if token == "SOL" else 8
-            return 1.0 / (out / (10**decimals))
-        return 0.0
-    except: return 0.0
+        swap_data = r.json()
+        if not swap_data.get("success"):
+            log("Raydium TX failed: "+str(swap_data.get("msg",""))[:80], "WARN")
+            return False, 0.0
+
+        txs = swap_data.get("data",[])
+        swap_tx_b64 = txs[0].get("transaction","") if txs else ""
+        if not swap_tx_b64:
+            log("No transaction in Raydium response", "WARN")
+            return False, 0.0
+
+        # Sign versioned transaction
+        raw_tx    = b64.b64decode(swap_tx_b64)
+        tx_obj    = VersionedTransaction.from_bytes(raw_tx)
+        sig       = keypair.sign_message(solders_message.to_bytes_versioned(tx_obj.message))
+        signed_tx = VersionedTransaction.populate(tx_obj.message, [sig])
+
+        # Send — Alchemy first, public RPC on 429
+        send_payload = {
+            "jsonrpc":"2.0","id":1,"method":"sendTransaction",
+            "params":[
+                b64.b64encode(bytes(signed_tx)).decode(),
+                {"encoding":"base64","skipPreflight":True,
+                 "preflightCommitment":"confirmed","maxRetries":3}
+            ]
+        }
+        send_rpc = ("https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY) if ALCHEMY_KEY else SOL_RPC
+        r2     = requests.post(send_rpc, json=send_payload, timeout=15)
+        result = r2.json()
+        if result.get("error",{}).get("code") == 429:
+            log("Rate limited on send — retrying in 3s", "WARN")
+            time.sleep(3)
+            r2     = requests.post(SOL_RPC, json=send_payload, timeout=15)
+            result = r2.json()
+
+        tx_sig = result.get("result","")
+        if tx_sig:
+            log("SWAP EXECUTED: "+tx_sig[:20]+"... "+from_token+"→"+to_token+via)
+            trade = {"time":time.strftime("%H:%M:%S"),"side":"LIVE-"+side+via,
+                     "price":price,"amount":out_human,"router":"Raydium",
+                     "chain":"solana","tx":tx_sig[:20]}
+            state["trades"].append(trade)
+            return True, out_human
+        else:
+            log("Send failed: "+str(result.get("error",""))[:100], "WARN")
+            return False, 0.0
+
+    except ImportError as ie:
+        log("Missing package: "+str(ie), "WARN"); return False, 0.0
+    except Exception as ex:
+        log("Swap error: "+str(ex)[:100], "WARN"); return False, 0.0
+
 
 def get_evm_dex_price(chain, pair):
     """Get on-chain DEX price via 0x API for EVM chains"""
@@ -754,7 +804,7 @@ def scan_arbitrage():
     chain = state.get("chain", "ethereum")
 
     if chain == "solana":
-        sol_pairs = ["SOL/USDC", "JUP/USDC", "ETH/USDC", "BONK/USDC"]
+        sol_pairs = ["SOL/USDC", "JUP/USDC", "ETH/USDC"]
 
         TOKEN_MINTS = {
             "SOL":  "So11111111111111111111111111111111111111112",
@@ -762,71 +812,105 @@ def scan_arbitrage():
             "JUP":  "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
             "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
         }
+        USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
-        # Target DEXes for arbitrage comparison
-        TARGET_DEXES = ["raydium", "raydium_clmm", "orca", "meteora"]
+        TOKEN_DECIMALS = {"SOL": 9, "ETH": 8, "JUP": 6, "BONK": 5, "WIF": 6, "USDC": 6}
 
-        def get_dexpaprika_prices(token):
+        # Jupiter DEX labels — confirmed from Jupiter docs
+        # onlyDirectRoutes=true ensures single-hop so price is from that DEX only
+        # Exact DEX label strings from Jupiter /program-id-to-label endpoint
+        # Confirmed from Jupiter docs: dexes=Raydium,Orca+V2,Meteora+DLMM
+        DEX_LABELS = {
+            "Raydium":  "Raydium",
+            "Orca":     "Orca+V2",
+            "Meteora":  "Meteora+DLMM",
+        }
+
+        def jupiter_quote_for_dex(token, dex_label, usdc_amount=1.0):
             """
-            Get per-DEX prices using DexPaprika token pools endpoint.
-            No API key, no rate limits, returns live pool prices.
-            API: https://api.dexpaprika.com/networks/solana/tokens/{mint}/pools
-            Returns dict of {dex_name: price_usd}
+            Get a quote from Jupiter forcing only one specific DEX.
+            URL: https://quote-api.jup.ag/v6/quote (confirmed working public endpoint)
+            dex_label must be URL-encoded DEX name e.g. "Raydium", "Orca+V2", "Meteora+DLMM"
+            Returns price in USD per token, or 0.0 on failure.
             """
             try:
-                mint = TOKEN_MINTS.get(token, "")
-                if not mint: return {}
+                token_mint = TOKEN_MINTS.get(token, "")
+                if not token_mint: return 0.0
+                token_dec = TOKEN_DECIMALS.get(token, 9)
+                lamports  = int(usdc_amount * 1e6)  # 1 USDC = 1,000,000 lamports
+
+                headers = {}
+                if JUPITER_API_KEY:
+                    headers["Authorization"] = "Bearer "+JUPITER_API_KEY
+
+                # Rate limiting — 1.5s minimum between any Jupiter calls
+                time.sleep(1.5)
+
                 r = requests.get(
-                    "https://api.dexpaprika.com/networks/solana/tokens/"+mint+"/pools",
-                    params={"page": 0, "limit": 50, "sort": "desc", "order_by": "volume_usd"},
-                    timeout=10
+                    "https://quote-api.jup.ag/v6/quote",
+                    params={
+                        "inputMint":                  USDC_MINT,
+                        "outputMint":                 token_mint,
+                        "amount":                     str(lamports),
+                        "slippageBps":                "10",
+                        "dexes":                      dex_label,
+                        "onlyDirectRoutes":           "true",
+                        "restrictIntermediateTokens": "true",
+                    },
+                    headers=headers,
+                    timeout=12
                 )
+
+                if r.status_code == 429:
+                    wait = int(r.headers.get("Retry-After", 10))
+                    log("Jupiter 429 ("+dex_label+") — backing off "+str(wait)+"s", "WARN")
+                    time.sleep(wait)
+                    return 0.0
                 if r.status_code != 200:
-                    log("DexPaprika status "+str(r.status_code)+" for "+token, "WARN")
-                    return {}
+                    log("Jupiter quote "+dex_label+" HTTP "+str(r.status_code), "WARN")
+                    return 0.0
 
-                pools = r.json().get("pools", [])
-                dex_prices = {}
+                data = r.json()
+                if "error" in data or "errorCode" in data:
+                    # Common: "COULD_NOT_FIND_ANY_ROUTE" means DEX has no pool for this pair
+                    err = data.get("error", data.get("errorCode","unknown"))
+                    log("Jupiter "+dex_label+" no route: "+str(err)[:50], "WARN")
+                    return 0.0
 
-                for pool in pools:
-                    dex_id   = pool.get("dex_id", "").lower()
-                    dex_name = pool.get("dex_name", "")
-                    price    = float(pool.get("price_usd", 0) or 0)
-                    tokens   = pool.get("tokens", [])
+                out_lamports = int(data.get("outAmount", 0))
+                if out_lamports <= 0: return 0.0
 
-                    # Only use pools that contain USDC as the quote token
-                    token_symbols = [t.get("symbol","") for t in tokens]
-                    if "USDC" not in token_symbols: continue
-                    if price <= 0: continue
-
-                    # Map to friendly names, keep only target DEXes
-                    if dex_id in ("raydium", "raydium_clmm") and "Raydium" not in dex_prices:
-                        dex_prices["Raydium"] = price
-                    elif dex_id == "orca" and "Orca" not in dex_prices:
-                        dex_prices["Orca"] = price
-                    elif dex_id == "meteora" and "Meteora" not in dex_prices:
-                        dex_prices["Meteora"] = price
-
-                    # Stop once we have all three
-                    if len(dex_prices) >= 3: break
-
-                return dex_prices
+                tokens_per_usdc = out_lamports / (10 ** token_dec)
+                price_usd = usdc_amount / tokens_per_usdc if tokens_per_usdc > 0 else 0.0
+                return price_usd
 
             except Exception as ex:
-                log("DexPaprika error for "+token+": "+str(ex)[:60], "WARN")
-                return {}
+                log("Jupiter quote "+dex_label+": "+str(ex)[:60], "WARN")
+                return 0.0
 
         try:
+            usdc_bal = state.get("sol_usdc", 0)
+            size     = min(usdc_bal * cfg["risk_pct"] / 100, cfg["max_pos"])
+
             for pair in sol_pairs:
                 token  = pair.split("/")[0]
-                prices = get_dexpaprika_prices(token)
+                prices = {}
+
+                # Query each DEX separately via Jupiter's dexes filter
+                for dex_name, dex_label in DEX_LABELS.items():
+                    p = jupiter_quote_for_dex(token, dex_label, usdc_amount=1.0)
+                    if p > 0:
+                        prices[dex_name] = p
+                    time.sleep(0.5)  # 500ms between calls — well within rate limits
 
                 if prices:
                     log("SOL ARB scan "+pair+": "+str({k:round(v,6) for k,v in prices.items()}))
                 else:
-                    log("SOL ARB scan "+pair+": no prices returned","WARN")
+                    log("SOL ARB scan "+pair+": no DEX quotes returned","WARN")
 
                 if len(prices) >= 2:
+                    # Two tx fees on Solana ~$0.002 each
+                    est_gas = 0.004
                     vals = list(prices.items())
                     for i in range(len(vals)):
                         for j in range(i+1, len(vals)):
@@ -834,32 +918,38 @@ def scan_arbitrage():
                             n2,p2 = vals[j]
                             if p1<=0 or p2<=0: continue
                             spread = abs(p1-p2)/min(p1,p2)*100
-                            if spread > 0.01:
-                                buy_from   = n1 if p1 < p2 else n2
-                                sell_on    = n2 if p1 < p2 else n1
-                                buy_price  = min(p1,p2)
-                                sell_price = max(p1,p2)
-                                est_gas    = 0.002
-                                bal        = state.get("sol_balance", 0)
-                                size       = min(bal*cfg["risk_pct"]/100, cfg["max_pos"])
-                                gross      = (sell_price-buy_price)*(size/buy_price) if buy_price>0 else 0
-                                est_profit = round(gross - est_gas, 6)
-                                opps.append({
-                                    "pair":           pair,
-                                    "buy_from":       buy_from,
-                                    "sell_on":        sell_on,
-                                    "buy_price":      round(buy_price,6),
-                                    "sell_price":     round(sell_price,6),
-                                    "spread_pct":     round(spread,4),
-                                    "est_gas_usd":    est_gas,
-                                    "est_profit_usd": est_profit,
-                                    "chain":          "solana",
-                                    "executable":     spread >= cfg["min_arb_spread"] and est_profit > 0 and size >= 0.10,
-                                })
-                time.sleep(3)  # 3s between tokens to avoid rate limits
+                            # Minimum spread must exceed 2 legs × Raydium fee (~0.25% each) + slippage
+                            if spread < 1.5: continue
+                            buy_from   = n1 if p1 < p2 else n2
+                            sell_on    = n2 if p1 < p2 else n1
+                            buy_price  = min(p1,p2)
+                            sell_price = max(p1,p2)
+                            # Realistic profit after fees (0.25% per DEX) and gas
+                            net_spread = spread - 0.6
+                            gross      = (net_spread/100) * size if size > 0 else 0
+                            est_profit = round(gross - est_gas, 6)
+                            opps.append({
+                                "pair":           pair,
+                                "buy_from":       buy_from,
+                                "sell_on":        sell_on,
+                                "buy_price":      round(buy_price,6),
+                                "sell_price":     round(sell_price,6),
+                                "spread_pct":     round(spread,4),
+                                "est_gas_usd":    est_gas,
+                                "est_profit_usd": est_profit,
+                                "chain":          "solana",
+                                "executable":     (
+                                    spread >= cfg["min_arb_spread"]
+                                    and est_profit > 0
+                                    and size >= 0.10
+                                    and usdc_bal >= 0.10
+                                ),
+                            })
+
+                time.sleep(1)  # 1s between pairs
 
         except Exception as ex:
-            log("SOL ARB error: "+str(ex), "WARN")
+            log("SOL ARB scan error: "+str(ex), "WARN")
 
     else:
         evm_pairs = ["BTC/USDT","ETH/USDT","BNB/USDT","SOL/USDT"]
@@ -913,63 +1003,89 @@ def execute_arbitrage(opp):
     buy_from   = opp["buy_from"]
     sell_on    = opp["sell_on"]
 
+    # Pre-flight safety checks
     if spread < cfg["min_arb_spread"]:
-        log("ARB skipped — spread "+str(spread)+"% < min "+str(cfg["min_arb_spread"])+"%","WARN"); return False
+        log("ARB skipped — spread "+str(spread)+"% < min "+str(cfg["min_arb_spread"])+"%","WARN")
+        return False
     if est_profit <= 0:
-        log("ARB skipped — profit negative after gas","WARN"); return False
+        log("ARB skipped — estimated profit negative after fees","WARN")
+        return False
     if state["daily_loss"] >= cfg["max_loss"]:
-        log("ARB skipped — daily loss limit hit","WARN"); return False
+        log("ARB skipped — daily loss limit hit","WARN")
+        return False
 
-    if chain == "solana":
-        bal = state.get("sol_usdc", 0)  # Use USDC only, not total SOL+USDC
-    else:
-        bal = state["balance"]
-    size = min(bal*cfg["risk_pct"]/100, cfg["max_pos"])
+    usdc_bal = state.get("sol_usdc", 0) if chain == "solana" else state["balance"]
+    size     = min(usdc_bal * cfg["risk_pct"] / 100, cfg["max_pos"])
     if size < 0.10:
-        log("ARB skipped — insufficient USDC balance $"+str(round(bal,2)),"WARN"); return False
+        log("ARB skipped — USDC balance $"+str(round(usdc_bal,2))+" too low","WARN")
+        return False
 
     token = pair.split("/")[0]
-    amt   = round(size/price, 6)
+    amt   = round(size / price, 6) if price > 0 else 0
 
     if state["paper_trading"]:
-        log("[PAPER] ARB: "+token+" buy on "+buy_from+" @ $"+str(price)+" sell on "+sell_on+" @ $"+str(opp["sell_price"])+" spread "+str(spread)+"% est profit $"+str(est_profit))
+        log("[PAPER] ARB: "+token+" buy on "+buy_from+" @ $"+str(price)+
+            " → sell on "+sell_on+" @ $"+str(opp["sell_price"])+
+            " spread "+str(spread)+"% est $"+str(est_profit))
         record_trade("[PAPER] ARB", price, amt, round(est_profit,2))
         state["pnl"] += est_profit * 0.7
         return True
-    else:
-        if chain == "solana":
-            log("Executing Solana ARB: BUY "+token+" on "+buy_from+" @ $"+str(price))
-            # Leg 1: Buy token with USDC
-            buy_result = jupiter_swap("USDC", token, size, price)
-            if not buy_result:
-                log("ARB buy leg failed", "WARN")
-                return False
 
-            # Wait briefly for buy confirmation
-            time.sleep(3)
+    if chain != "solana":
+        # EVM arb — basic implementation
+        result = place_order(pair, "buy", amt)
+        if result:
+            record_trade("ARB "+buy_from+"→"+sell_on, price, amt, round(est_profit,2))
+        return bool(result)
 
-            # Leg 2: Sell token back to USDC at higher price
-            sell_price   = opp["sell_price"]
-            token_amount = round(size / price, 6)
-            log("Executing Solana ARB: SELL "+str(token_amount)+" "+token+" on "+sell_on+" @ $"+str(sell_price))
-            sell_result = jupiter_swap(token, "USDC", token_amount, sell_price)
-            if sell_result:
-                actual_profit = round((sell_price - price) * token_amount - opp["est_gas_usd"], 6)
-                state["pnl"] += actual_profit
-                record_trade("ARB "+buy_from+"→"+sell_on, price, token_amount, round(actual_profit, 4))
-                log("Solana ARB complete — profit: $"+str(actual_profit))
-                return True
-            else:
-                log("ARB sell leg failed — holding "+str(token_amount)+" "+token, "WARN")
-                record_trade("ARB-BUY-ONLY (sell failed)", price, token_amount, None)
-                return False
+    # ── Solana live two-leg arbitrage ─────────────────────────────────────────
+    state["trading_lock"]   = True
+    state["last_trade_time"] = time.time()
+
+    try:
+        log("ARB LEG 1: BUY "+token+" with $"+str(round(size,4))+" USDC on "+buy_from)
+        buy_ok, token_received = jupiter_swap("USDC", token, size, price, dex=buy_from)
+        if not buy_ok or token_received <= 0:
+            log("ARB buy leg failed — aborting", "WARN")
+            state["trading_lock"] = False
+            return False
+
+        log("ARB LEG 1 complete: received "+str(round(token_received,6))+" "+token)
+
+        # Wait for on-chain confirmation before selling
+        time.sleep(5)
+
+        # Sell EXACTLY what we received from the buy quote
+        sell_price = opp["sell_price"]
+        log("ARB LEG 2: SELL "+str(round(token_received,6))+" "+token+" on "+sell_on)
+        sell_ok, usdc_received = jupiter_swap(token, "USDC", token_received, sell_price, dex=sell_on)
+
+        if sell_ok and usdc_received > 0:
+            # Actual profit = USDC returned minus USDC spent minus gas
+            actual_profit = round(usdc_received - size - opp["est_gas_usd"], 6)
+            state["pnl"] += actual_profit
+            if actual_profit < 0:
+                state["daily_loss"] += abs(actual_profit)
+            record_trade(
+                "ARB "+buy_from+"→"+sell_on,
+                price, token_received,
+                round(actual_profit, 4)
+            )
+            log("ARB complete — spent $"+str(round(size,4))+
+                " received $"+str(round(usdc_received,4))+
+                " profit $"+str(actual_profit))
+            state["trading_lock"] = False
+            return True
         else:
-            result = place_order(pair, "buy", amt)
-            if result:
-                record_trade("ARB via "+buy_from+"->"+sell_on, price, amt, round(est_profit,2))
-                log("EVM ARB executed @ $"+str(price)+" profit est: $"+str(est_profit))
-                return True
-    return False
+            log("ARB sell leg failed — holding "+str(round(token_received,6))+" "+token, "WARN")
+            record_trade("ARB-BUY-ONLY (sell failed)", price, token_received, None)
+            state["trading_lock"] = False
+            return False
+
+    except Exception as ex:
+        log("execute_arbitrage error: "+str(ex)[:80], "WARN")
+        state["trading_lock"] = False
+        return False
 
 ARB_PAIRS = ["BTC/USDT","ETH/USDT","BNB/USDT","SOL/USDT"]
 
@@ -1122,13 +1238,25 @@ def run_arbitrage():
     chain = state.get("chain","ethereum")
     log("Arbitrage started ["+mode+" MODE] on "+chain+" — min spread: "+str(cfg["min_arb_spread"])+"%")
     while state["running"] and state["strategy"]=="arb":
+        # Don't scan if a trade is in progress
+        if state["trading_lock"]:
+            time.sleep(5)
+            continue
+
+        # Cooldown between trades — wait 15s after last trade
+        time_since_last = time.time() - state["last_trade_time"]
+        if time_since_last < 15:
+            time.sleep(15 - time_since_last)
+            continue
+
         opps = scan_arbitrage()
+        # Only execute the BEST opportunity per cycle, not all of them
         for opp in opps:
             if not state["running"]: break
             if opp["executable"]:
                 log("ARB opportunity: "+opp["pair"]+" spread "+str(opp["spread_pct"])+"% est profit $"+str(opp["est_profit_usd"]))
                 execute_arbitrage(opp)
-                time.sleep(5)
+                break  # Stop after first executable — wait for next scan cycle
         time.sleep(30)
 
 STRATEGIES = {"dca":run_dca,"grid":run_grid,"scalp":run_scalp,"copy":run_copy,"arb":run_arbitrage}
@@ -1273,9 +1401,7 @@ td{padding:8px 0;border-bottom:1px solid #0f0f0f;color:#888}
       <button class="btn" id="p-BTC/USDC"   onclick="selectPair('BTC/USDC')">BTC/USDC</button>
       <button class="btn" id="p-ETH/USDC"   onclick="selectPair('ETH/USDC')">ETH/USDC</button>
       <button class="btn" id="p-JUP/USDC"   onclick="selectPair('JUP/USDC')">JUP/USDC</button>
-      <button class="btn" id="p-BONK/USDC"  onclick="selectPair('BONK/USDC')">BONK/USDC</button>
       <button class="btn" id="p-WIF/USDC"   onclick="selectPair('WIF/USDC')">WIF/USDC</button>
-      <button class="btn" id="p-BONK/USDC"  onclick="selectPair('BONK/USDC')">BONK/USDC</button>
       <button class="btn" id="p-JUP/USDC"   onclick="selectPair('JUP/USDC')">JUP/USDC</button>
     </div>
 
