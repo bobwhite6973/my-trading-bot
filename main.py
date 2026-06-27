@@ -560,6 +560,29 @@ def jupiter_swap(from_token, to_token, amount_usd, price):
                     return False
 
             # Get swap transaction from Raydium
+            # Derive Associated Token Account (ATA) for input token
+            # Raydium requires the actual token account, not just wallet address
+            def get_ata(wallet_addr, mint_addr):
+                """Get Associated Token Account address via Solana RPC"""
+                try:
+                    payload = {
+                        "jsonrpc": "2.0", "id": 1,
+                        "method": "getTokenAccountsByOwner",
+                        "params": [wallet_addr, {"mint": mint_addr}, {"encoding": "jsonParsed"}]
+                    }
+                    r = requests.post(SOL_RPC, json=payload, timeout=8)
+                    accounts = r.json().get("result",{}).get("value",[])
+                    if accounts:
+                        return accounts[0].get("pubkey","")
+                    return ""
+                except:
+                    return ""
+
+            usdc_mint = SOL_TOKENS.get("USDC","EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+            input_account  = get_ata(wallet, from_mint) if from_token != "SOL" else None
+            output_account = get_ata(wallet, to_mint)   if to_token  != "SOL" else None
+            log("Input ATA: "+str(input_account)+" Output ATA: "+str(output_account))
+
             # Raydium transaction endpoint expects the compute response directly
             swap_payload = {
                 "computeUnitPriceMicroLamports": "1000",
@@ -568,8 +591,8 @@ def jupiter_swap(from_token, to_token, amount_usd, price):
                 "wallet":       wallet,
                 "wrapSol":      from_token == "SOL",
                 "unwrapSol":    to_token == "SOL",
-                "inputAccount":  None,
-                "outputAccount": None,
+                "inputAccount":  input_account  if input_account  else None,
+                "outputAccount": output_account if output_account else None,
             }
             log("Swap payload swapResponse type: "+str(type(quote).__name__)+" keys: "+str(list(quote.keys()) if isinstance(quote,dict) else "not dict")[:80])
             r = requests.post(
