@@ -588,66 +588,77 @@ def scan_arbitrage():
         sol_pairs = ["SOL/USDC", "BTC/USDC", "ETH/USDC"]
 
         def get_raydium_pool_price(token_symbol):
-            """Get price from Raydium via their public API"""
+            """Get price from Raydium v3 API"""
             try:
+                # Use Raydium v3 API swap quote endpoint
+                sol_mint  = "So11111111111111111111111111111111111111112"
+                usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                token_mints = {
+                    "SOL": sol_mint,
+                    "BTC": "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
+                    "ETH": "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
+                }
+                in_mint = token_mints.get(token_symbol, sol_mint)
                 r = requests.get(
-                    "https://api.raydium.io/v2/main/pairs",
+                    "https://api-v3.raydium.io/mint/price",
+                    params={"mints": in_mint+","+usdc_mint},
                     timeout=10
                 )
                 if r.status_code != 200:
-                    log("Raydium API status: "+str(r.status_code), "WARN")
+                    log("Raydium v3 API status: "+str(r.status_code),"WARN")
                     return 0.0
-                pairs = r.json()
-                target = token_symbol+"-USDC"
-                for p in pairs:
-                    name = p.get("name","")
-                    if name == target or name == "W"+target:
-                        price = float(p.get("price", 0))
-                        if price > 0:
-                            return price
-                return 0.0
+                data = r.json()
+                if not data.get("success"):
+                    log("Raydium v3 API: "+str(data.get("msg","")),"WARN")
+                    return 0.0
+                prices = data.get("data", {})
+                token_price = float(prices.get(in_mint, 0))
+                return token_price
             except Exception as ex:
                 log("Raydium API error: "+str(ex)[:60], "WARN")
                 return 0.0
 
         def get_orca_pool_price(token_symbol):
-            """Get price from Orca via their public API"""
+            """Get price from Orca whirlpool API"""
             try:
+                token_mints = {
+                    "SOL": "So11111111111111111111111111111111111111112",
+                    "BTC": "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
+                    "ETH": "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
+                }
+                mint = token_mints.get(token_symbol,"")
+                if not mint: return 0.0
                 r = requests.get(
-                    "https://api.orca.so/allPools",
+                    "https://api.mainnet.orca.so/v1/token/"+mint,
                     timeout=10
                 )
                 if r.status_code != 200:
+                    log("Orca API status: "+str(r.status_code),"WARN")
                     return 0.0
                 data = r.json()
-                target = token_symbol.upper()+"/USDC"
-                alt    = "W"+token_symbol.upper()+"/USDC"
-                for pool_id, pool in data.items():
-                    tokens = pool.get("tokenA",{}).get("symbol","")+"/"+ pool.get("tokenB",{}).get("symbol","")
-                    if tokens == target or tokens == alt:
-                        price = float(pool.get("price", 0))
-                        if price > 0:
-                            return price
-                return 0.0
+                price = float(data.get("price", 0))
+                return price
             except Exception as ex:
                 log("Orca API error: "+str(ex)[:60], "WARN")
                 return 0.0
 
         def get_meteora_pool_price(token_symbol):
-            """Get price from Meteora via their public API"""
+            """Get price from Meteora DLMM API"""
             try:
+                # Search for top SOL/USDC pool by volume
                 r = requests.get(
-                    "https://dlmm-api.meteora.ag/pair/all",
+                    "https://dlmm-api.meteora.ag/pair/all_with_pagination",
+                    params={"search_term": token_symbol+"-USDC", "limit": 5, "sort_key": "tvl", "order_by": "desc"},
                     timeout=10
                 )
                 if r.status_code != 200:
+                    log("Meteora API status: "+str(r.status_code),"WARN")
                     return 0.0
                 data = r.json()
-                target = token_symbol.upper()+"-USDC"
-                alt    = "W"+token_symbol.upper()+"-USDC"
-                for pool in (data if isinstance(data, list) else data.get("data",[])):
+                pools = data.get("pairs", data if isinstance(data, list) else [])
+                for pool in pools:
                     name = pool.get("name","")
-                    if target in name or alt in name:
+                    if token_symbol.upper() in name and "USDC" in name:
                         price = float(pool.get("current_price", 0))
                         if price > 0:
                             return price
