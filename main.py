@@ -492,7 +492,10 @@ def raydium_get_quote(from_mint, to_mint, amount):
         if not data.get("success"):
             log("Raydium quote failed: "+str(data.get("msg","")), "WARN")
             return None
-        return data.get("data", {})
+        # Return just the data portion - this is what swapResponse expects
+        result = data.get("data", {})
+        log("Raydium quote data keys: "+str(list(result.keys()))[:80])
+        return result
     except Exception as ex:
         log("Raydium quote error: "+str(ex)[:80], "ERROR")
     return None
@@ -557,14 +560,18 @@ def jupiter_swap(from_token, to_token, amount_usd, price):
                     return False
 
             # Get swap transaction from Raydium
+            # Raydium transaction endpoint expects the compute response directly
             swap_payload = {
                 "computeUnitPriceMicroLamports": "1000",
                 "swapResponse": quote,
                 "txVersion":    "V0",
                 "wallet":       wallet,
-                "wrapSol":      True,
-                "unwrapSol":    True,
+                "wrapSol":      from_token == "SOL",
+                "unwrapSol":    to_token == "SOL",
+                "inputAccount":  None,
+                "outputAccount": None,
             }
+            log("Swap payload swapResponse type: "+str(type(quote).__name__)+" keys: "+str(list(quote.keys()) if isinstance(quote,dict) else "not dict")[:80])
             r = requests.post(
                 "https://transaction-v1.raydium.io/transaction/swap-base-in",
                 json=swap_payload,
