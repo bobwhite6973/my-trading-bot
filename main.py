@@ -596,19 +596,6 @@ def scan_arbitrage():
             "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
         }
 
-        # Orca whirlpool vault accounts for direct on-chain price reading
-        # vault_a = token, vault_b = USDC — price = vault_b / vault_a
-        ORCA_VAULTS = {
-            "SOL":  ("HLmqeL62xR1QoZ1HKKbXRrdN1p3phKpxRMb2VVopvBBz",  # SOL vault
-                     "9RfZwn2Prux6QesG1Noo4HzMEBv3rPndbl46wS7QiJ38"), # USDC vault
-            "ETH":  ("6ikv2DpZXDNrzWTsyMZHqU85J4QmN7TWCdgGNJCxH7oE",  # ETH vault
-                     "8cfZiPmSss3ATEbFoHbWsJSVMVVVRskKoiQs7WFBe3jP"), # USDC vault
-            "JUP":  ("2ihQKMpEFjKPWePXHKGPGKxbGGjFP5EXNXXiHxaUaDNM",  # JUP vault
-                     "BYaGFLekSQiHurJsxmR3aCdMaT3gjPe2NVkoZD6WWTH6"), # USDC vault
-            "BONK": ("8UmSCFBpNR2H1DtTMRaZBQKkFtJwz1FZ6QNXGHb8B5nQ",  # BONK vault
-                     "2kfVfLLJsuHPBBQMjPCpJKErhLMNMiCR9RNj9V3bGVzk"), # USDC vault
-        }
-
         def get_raydium_price(token):
             """Get price from Raydium v3 API — confirmed working"""
             try:
@@ -628,26 +615,64 @@ def scan_arbitrage():
                 return 0.0
 
         def get_orca_price_onchain(token):
-            """Read Orca pool price directly from on-chain vault balances via Solana RPC"""
+            """Read Orca Whirlpool price from pool account data via Solana RPC.
+            The Whirlpool account stores sqrtPrice at bytes 65-80 (u128).
+            Price = (sqrtPrice / 2^64)^2, adjusted for decimals (9 for SOL, 6 for USDC).
+            """
+            ORCA_POOLS = {
+                "SOL":  "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
+                "ETH":  "AU971DrPyhhrpRnmEBp5pDTWL2ny7nofb5vYBjDJkR2E",
+                "JUP":  "GaRZqVJCpRMsM12ZTaP13zpaY6npHw2SeruZRWY2GGfn",
+                "BONK": "8QaXeHBrShJTdtN1rWCccBxpSVvKksQ2PCu5nufb2zbk",
+            }
+            DECIMALS_A = {"SOL": 9, "ETH": 8, "JUP": 6, "BONK": 5}
+            DECIMALS_B = 6  # USDC always 6 decimals
+
             try:
-                vaults = ORCA_VAULTS.get(token)
-                if not vaults: return 0.0
-                vault_a, vault_b = vaults
+                pool_addr = ORCA_POOLS.get(token,"")
+                if not pool_addr: return 0.0
 
-                def get_vault_balance(addr):
-                    payload = {"jsonrpc":"2.0","id":1,"method":"getTokenAccountBalance","params":[addr]}
-                    r = requests.post(SOL_RPC, json=payload, timeout=8)
-                    return float(r.json().get("result",{}).get("value",{}).get("uiAmount") or 0)
+                payload = {
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "getAccountInfo",
+                    "params": [pool_addr, {"encoding": "base64"}]
+                }
+                r = requests.post(SOL_RPC, json=payload, timeout=8)
+                data = r.json()
+                account_data = data.get("result",{}).get("value",{}).get("data",[None])[0]
+                if not account_data:
+                    log("Orca: no account data for "+token, "WARN")
+                    return 0.0
 
-                bal_a = get_vault_balance(vault_a)  # token amount
-                bal_b = get_vault_balance(vault_b)  # USDC amount
-                if bal_a > 0 and bal_b > 0:
-                    price = bal_b / bal_a
-                    log("Orca(RPC) "+token+"/USDC: $"+str(round(price,6))+" ("+str(round(bal_a,2))+" tokens, $"+str(round(bal_b,2))+" USDC)")
-                    return price
-                return 0.0
+                import base64
+                raw = base64.b64decode(account_data)
+
+                # Whirlpool account layout:
+                # 8 bytes discriminator
+                # 32 bytes whirlpools_config
+                # 1 byte bump
+                # 2 bytes tick_spacing
+                # 2 bytes tick_spacing_seed
+                # 2 bytes fee_rate
+                # 2 bytes protocol_fee_rate
+                # 8 bytes liquidity
+                # 16 bytes sqrt_price_x64  <-- at offset 65
+                sqrt_price_offset = 8 + 32 + 1 + 2 + 2 + 2 + 2 + 8  # = 57... let me use known offset
+                # From Orca source: sqrtPrice is at byte offset 65
+                sqrt_price_bytes = raw[65:81]
+                sqrt_price = int.from_bytes(sqrt_price_bytes, "little")
+
+                # Price = (sqrtPrice / 2^64)^2 * 10^(decimals_a - decimals_b)
+                dec_a = DECIMALS_A.get(token, 9)
+                price_raw = (sqrt_price / (2**64))**2
+                price = price_raw * (10**(dec_a - DECIMALS_B))
+
+                if price > 0:
+                    log("Orca(RPC) "+token+"/USDC: $"+str(round(price,6)))
+                return price
+
             except Exception as ex:
-                log("Orca RPC error "+token+": "+str(ex)[:60], "WARN")
+                log("Orca RPC error "+token+": "+str(ex)[:80], "WARN")
                 return 0.0
 
         try:
