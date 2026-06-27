@@ -560,8 +560,7 @@ def jupiter_swap(from_token, to_token, amount_usd, price):
                     return False
 
             # Get swap transaction from Raydium
-            # Derive Associated Token Account (ATA) for input token
-            # Raydium requires the actual token account, not just wallet address
+            # Derive Associated Token Account (ATA) for input/output tokens
             def get_ata(wallet_addr, mint_addr):
                 """Get Associated Token Account address via Solana RPC"""
                 try:
@@ -578,9 +577,67 @@ def jupiter_swap(from_token, to_token, amount_usd, price):
                 except:
                     return ""
 
-            usdc_mint = SOL_TOKENS.get("USDC","EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+            def create_ata_if_needed(keypair, wallet_addr, mint_addr):
+                """Create Associated Token Account if it doesn't exist"""
+                try:
+                    from solders.pubkey import Pubkey
+                    from solders.system_program import ID as SYS_PROGRAM_ID
+                    from spl.token.constants import TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
+                    from spl.token.instructions import get_associated_token_address, create_associated_token_account
+                    from solders.transaction import Transaction
+                    import base64 as b64
+
+                    owner = Pubkey.from_string(wallet_addr)
+                    mint  = Pubkey.from_string(mint_addr)
+                    ata   = get_associated_token_address(owner, mint)
+                    ata_str = str(ata)
+
+                    # Check if it already exists
+                    existing = get_ata(wallet_addr, mint_addr)
+                    if existing:
+                        return existing
+
+                    log("Creating ATA for mint "+mint_addr[:8]+"...")
+                    ix = create_associated_token_account(
+                        payer=owner, owner=owner, mint=mint
+                    )
+                    # Get recent blockhash
+                    bh_payload = {"jsonrpc":"2.0","id":1,"method":"getLatestBlockhash","params":[]}
+                    bh_r = requests.post(SOL_RPC, json=bh_payload, timeout=8)
+                    blockhash = bh_r.json().get("result",{}).get("value",{}).get("blockhash","")
+
+                    tx = Transaction.new_signed_with_payer(
+                        [ix], payer=owner,
+                        signing_keypairs=[keypair],
+                        recent_blockhash=blockhash
+                    )
+                    send_payload = {
+                        "jsonrpc":"2.0","id":1,"method":"sendTransaction",
+                        "params":[b64.b64encode(bytes(tx)).decode(),{"encoding":"base64"}]
+                    }
+                    send_r = requests.post(SOL_RPC, json=send_payload, timeout=15)
+                    sig = send_r.json().get("result","")
+                    if sig:
+                        log("ATA created: "+sig[:20]+"...")
+                        time.sleep(3)  # wait for confirmation
+                        return ata_str
+                    else:
+                        log("ATA creation failed: "+str(send_r.json().get("error",""))[:60], "WARN")
+                        return ""
+                except ImportError:
+                    log("spl-token package not installed — add 'spl' to requirements.txt", "WARN")
+                    return ""
+                except Exception as ex:
+                    log("ATA creation error: "+str(ex)[:80], "WARN")
+                    return ""
+
             input_account  = get_ata(wallet, from_mint) if from_token != "SOL" else None
             output_account = get_ata(wallet, to_mint)   if to_token  != "SOL" else None
+
+            # Create output ATA if it doesn't exist
+            if to_token != "SOL" and not output_account:
+                output_account = create_ata_if_needed(keypair, wallet, to_mint)
+
             log("Input ATA: "+str(input_account)+" Output ATA: "+str(output_account))
 
             # Raydium transaction endpoint expects the compute response directly
