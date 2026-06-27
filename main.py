@@ -470,7 +470,7 @@ def jupiter_get_quote(from_mint, to_mint, amount_lamports):
         log("Jupiter quote error: "+str(ex), "ERROR")
     return None
 
-def raydium_get_quote(from_mint, to_mint, amount):
+def raydium_get_quote(from_mint, to_mint, amount, slippage_bps="200"):
     """Get swap quote from Raydium Trade API - confirmed real endpoint"""
     try:
         r = requests.get(
@@ -479,7 +479,7 @@ def raydium_get_quote(from_mint, to_mint, amount):
                 "inputMint":   from_mint,
                 "outputMint":  to_mint,
                 "amount":      str(amount),
-                "slippageBps": "50",
+                "slippageBps": slippage_bps,
                 "txVersion":   "V0",
             },
             timeout=10
@@ -516,7 +516,9 @@ def jupiter_swap(from_token, to_token, amount_usd, price):
     log("Swap input: "+str(amount_usd)+" "+from_token+" = "+str(lamports)+" lamports ("+str(from_decimals)+" decimals)")
 
     # Get quote — try Raydium first (confirmed works from Render), Jupiter as fallback
-    quote = raydium_get_quote(from_mint, to_mint, lamports)
+    # Use higher slippage for sells to account for price movement
+    slippage = "100" if from_token in ("USDC","USDT") else "300"
+    quote = raydium_get_quote(from_mint, to_mint, lamports, slippage)
     router = "Raydium"
     if quote:
         out_amount = int(quote.get("data",{}).get("outputAmount", quote.get("data",{}).get("outAmount", 0)))
