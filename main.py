@@ -308,6 +308,7 @@ def dex_get_balance():
         tokens = TOKENS.get(chain, {})
         usdt_addr = tokens.get("USDT","")
         rpcs = get_rpc(chain)
+        log("Checking balance for wallet: "+wallet[:10]+"... on "+chain+" via "+str(len(rpcs))+" RPC(s)")
 
         # Try USDT balance first
         for rpc in rpcs:
@@ -318,12 +319,16 @@ def dex_get_balance():
                     "data": "0x70a08231000000000000000000000000"+padded
                 },"latest"],"id":1}
                 r = requests.post(rpc, json=payload, timeout=8)
-                result = r.json().get("result","0x0")
+                resp = r.json()
+                result = resp.get("result","0x0")
+                log("USDT RPC response: "+str(result)[:40])
                 if result and result != "0x" and result != "0x0":
                     balance = int(result, 16) / 1e6
                     state["balance"] = balance
                     log("Balance: $"+str(round(balance,2))+" USDT")
                     return balance
+                else:
+                    log("USDT result was zero or empty — trying native balance")
             except Exception as ex:
                 log("RPC attempt failed: "+str(ex), "WARN")
                 continue
@@ -334,23 +339,25 @@ def dex_get_balance():
                 payload = {"jsonrpc":"2.0","method":"eth_getBalance","params":[wallet,"latest"],"id":1}
                 r = requests.post(rpc, json=payload, timeout=8)
                 result = r.json().get("result","0x0")
+                log("Native balance RPC response: "+str(result)[:40])
                 if result and result != "0x":
                     native = int(result, 16) / 1e18
                     price = get_price_kraken("ETH/USDT") or 3000
                     usd_val = round(native * price, 2)
                     state["balance"] = usd_val
-                    log("Native balance: "+str(round(native,6))+" = $"+str(usd_val))
+                    log("Native balance: "+str(round(native,6))+" ETH = $"+str(usd_val))
                     return usd_val
-            except:
+            except Exception as ex:
+                log("Native balance failed: "+str(ex), "WARN")
                 continue
 
-        log("All RPC endpoints failed for balance check", "WARN")
+        log("All balance checks failed", "WARN")
     except Exception as ex:
         log("DEX balance error: "+str(ex), "ERROR")
     return 0.0
 
 def start_background_loops():
-    """Start continuous price + arb scanning regardless of strategy"""
+    """Start continuous price + balance + arb scanning regardless of strategy"""
     def price_loop():
         while True:
             try:
@@ -362,6 +369,17 @@ def start_background_loops():
                 pass
             time.sleep(5)
 
+    def balance_loop():
+        while True:
+            try:
+                if state.get("mode") == "dex":
+                    dex_get_balance()
+                elif state.get("mode") == "cex":
+                    cex_get_balance()
+            except:
+                pass
+            time.sleep(30)
+
     def arb_loop():
         while True:
             try:
@@ -371,8 +389,9 @@ def start_background_loops():
             time.sleep(30)
 
     threading.Thread(target=price_loop, daemon=True).start()
+    threading.Thread(target=balance_loop, daemon=True).start()
     threading.Thread(target=arb_loop, daemon=True).start()
-    log("Background price feed and arb scanner started")
+    log("Background price feed, balance and arb scanner started")
 
 # ── Arbitrage ─────────────────────────────────────────────────────────────────
 ARB_PAIRS = ["BTC/USDT","ETH/USDT","BNB/USDT","SOL/USDT"]
