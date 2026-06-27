@@ -408,7 +408,7 @@ def start_background_loops():
     log("Background price feed, balance and arb scanner started")
 
 # ── Solana ────────────────────────────────────────────────────────────────────
-SOL_RPC = "https://api.mainnet-beta.solana.com"
+SOL_RPC = "https://solana-mainnet.g.alchemy.com/v2/"+os.environ.get("ALCHEMY_KEY","") if os.environ.get("ALCHEMY_KEY") else "https://api.mainnet-beta.solana.com"
 JUPITER_API = "https://quote-api.jup.ag/v6"
 
 # Solana token mints
@@ -662,10 +662,11 @@ def scan_arbitrage():
                 sqrt_price_bytes = raw[65:81]
                 sqrt_price = int.from_bytes(sqrt_price_bytes, "little")
 
-                # Price = (sqrtPrice / 2^64)^2 * 10^(decimals_a - decimals_b)
+                # Price = (sqrtPrice / 2^64)^2 * 10^(decimals_b - decimals_a)
+                # For SOL/USDC: (sqrtPrice/2^64)^2 * 10^(6-9) = result / 1000
                 dec_a = DECIMALS_A.get(token, 9)
                 price_raw = (sqrt_price / (2**64))**2
-                price = price_raw * (10**(dec_a - DECIMALS_B))
+                price = price_raw * (10**(DECIMALS_B - dec_a))
 
                 if price > 0:
                     log("Orca(RPC) "+token+"/USDC: $"+str(round(price,6)))
@@ -1310,6 +1311,23 @@ class Handler(BaseHTTPRequestHandler):
         elif path=="/stop":
             stop_bot()
             self.respond(200,"application/json",b'{"ok":true}')
+        elif path=="/debug_orca":
+            try:
+                import base64 as b64
+                pool = "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE"
+                payload = {"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[pool,{"encoding":"base64"}]}
+                r = requests.post(SOL_RPC, json=payload, timeout=10)
+                raw_b64 = r.json().get("result",{}).get("value",{}).get("data",[None])[0]
+                if raw_b64:
+                    raw = b64.b64decode(raw_b64)
+                    sqrt_price = int.from_bytes(raw[65:81], "little")
+                    price = (sqrt_price / (2**64))**2 * (10**(6-9))
+                    result = {"length":len(raw),"sqrt_price":sqrt_price,"price":round(price,4),"offset_65_hex":raw[65:81].hex()}
+                else:
+                    result = {"error":"no data"}
+                self.respond(200,"application/json",json.dumps(result).encode())
+            except Exception as ex:
+                self.respond(200,"application/json",json.dumps({"error":str(ex)}).encode())
         elif path=="/toggle_paper":
             state["paper_trading"] = not state["paper_trading"]
             mode = "PAPER" if state["paper_trading"] else "LIVE"
