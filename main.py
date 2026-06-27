@@ -305,52 +305,60 @@ def dex_get_balance():
         if not wallet:
             log("No wallet address — add WALLET_ADDRESS to Render environment", "WARN")
             return 0.0
-        tokens = TOKENS.get(chain, {})
-        usdt_addr = tokens.get("USDT","")
-        rpcs = get_rpc(chain)
 
-        # Try USDT balance first
-        for rpc in rpcs:
+        # Try Alchemy Token API first (most reliable)
+        if ALCHEMY_KEY:
             try:
-                padded = wallet[2:].lower().zfill(64) if wallet.startswith("0x") else wallet.lower().zfill(64)
-                payload = {"jsonrpc":"2.0","method":"eth_call","params":[{
-                    "to": usdt_addr,
-                    "data": "0x70a08231000000000000000000000000"+padded
-                },"latest"],"id":1}
-                r = requests.post(rpc, json=payload, timeout=8)
-                result = r.json().get("result","0x0")
-                if result and result != "0x" and result != "0x0":
-                    balance = int(result, 16) / 1e6
-                    state["balance"] = balance
-                    log("Balance: $"+str(round(balance,2))+" USDT")
-                    return balance
+                chain_map = {
+                    "ethereum":"eth-mainnet","bsc":"bnb-mainnet",
+                    "base":"base-mainnet","arbitrum":"arb-mainnet","polygon":"polygon-mainnet"
+                }
+                network = chain_map.get(chain, "eth-mainnet")
+                url = "https://"+network+".g.alchemy.com/v2/"+ALCHEMY_KEY
+                payload = {
+                    "jsonrpc":"2.0","method":"alchemy_getTokenBalances",
+                    "params":[wallet,["0xdAC17F958D2ee523a2206206994597C13D831ec7"]],
+                    "id":1
+                }
+                r = requests.post(url, json=payload, timeout=8)
+                data = r.json()
+                log("Alchemy token response: "+str(data)[:80])
+                balances = data.get("result",{}).get("tokenBalances",[])
+                if balances:
+                    hex_val = balances[0].get("tokenBalance","0x0")
+                    if hex_val and hex_val != "0x0" and hex_val != "0x":
+                        balance = int(hex_val, 16) / 1e6
+                        state["balance"] = balance
+                        log("USDT Balance: $"+str(round(balance,2)))
+                        return balance
             except Exception as ex:
-                log("RPC attempt failed: "+str(ex), "WARN")
-                continue
+                log("Alchemy token API error: "+str(ex), "WARN")
 
-        # Fallback: native coin balance
+        # Fallback: native ETH balance
+        rpcs = get_rpc(chain)
         for rpc in rpcs:
             try:
                 payload = {"jsonrpc":"2.0","method":"eth_getBalance","params":[wallet,"latest"],"id":1}
                 r = requests.post(rpc, json=payload, timeout=8)
                 result = r.json().get("result","0x0")
-                if result and result != "0x":
+                if result and result != "0x" and result != "0x0":
                     native = int(result, 16) / 1e18
                     price = get_price_kraken("ETH/USDT") or 3000
                     usd_val = round(native * price, 2)
                     state["balance"] = usd_val
-                    log("Native balance: "+str(round(native,6))+" = $"+str(usd_val))
+                    log("ETH Balance: "+str(round(native,6))+" = $"+str(usd_val))
                     return usd_val
-            except:
+            except Exception as ex:
+                log("Native balance failed: "+str(ex), "WARN")
                 continue
 
-        log("All RPC endpoints failed for balance check", "WARN")
+        log("All balance checks failed", "WARN")
     except Exception as ex:
         log("DEX balance error: "+str(ex), "ERROR")
     return 0.0
 
 def start_background_loops():
-    """Start continuous price + arb scanning regardless of strategy"""
+    """Start continuous price + balance + arb scanning regardless of strategy"""
     def price_loop():
         while True:
             try:
@@ -362,6 +370,19 @@ def start_background_loops():
                 pass
             time.sleep(5)
 
+    def balance_loop():
+        time.sleep(5)  # wait for mode to be set
+        while True:
+            try:
+                mode = state.get("mode")
+                if mode == "dex" or (not mode and cfg["wallet"]):
+                    dex_get_balance()
+                elif mode == "cex" or (not mode and cfg["api_key"]):
+                    cex_get_balance()
+            except:
+                pass
+            time.sleep(20)
+
     def arb_loop():
         while True:
             try:
@@ -371,8 +392,9 @@ def start_background_loops():
             time.sleep(30)
 
     threading.Thread(target=price_loop, daemon=True).start()
+    threading.Thread(target=balance_loop, daemon=True).start()
     threading.Thread(target=arb_loop, daemon=True).start()
-    log("Background price feed and arb scanner started")
+    log("Background price feed, balance and arb scanner started")
 
 # ── Arbitrage ─────────────────────────────────────────────────────────────────
 ARB_PAIRS = ["BTC/USDT","ETH/USDT","BNB/USDT","SOL/USDT"]
