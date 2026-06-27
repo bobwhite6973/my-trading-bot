@@ -873,12 +873,20 @@ td{padding:8px 0;border-bottom:1px solid #0f0f0f;color:#888}
     </div>
 
     <div class="section-label">Trading Pair</div>
-    <div class="btn-row">
-      <button class="btn" id="p-BTC/USDT" onclick="selectPair('BTC/USDT')">BTC/USDT</button>
-      <button class="btn" id="p-ETH/USDT" onclick="selectPair('ETH/USDT')">ETH/USDT</button>
-      <button class="btn" id="p-BNB/USDT" onclick="selectPair('BNB/USDT')">BNB/USDT</button>
-      <button class="btn" id="p-SOL/USDT" onclick="selectPair('SOL/USDT')">SOL/USDT</button>
+    <div class="btn-row" id="pair-row">
+      <button class="btn" id="p-BTC/USDT"   onclick="selectPair('BTC/USDT')">BTC/USDT</button>
+      <button class="btn" id="p-ETH/USDT"   onclick="selectPair('ETH/USDT')">ETH/USDT</button>
+      <button class="btn" id="p-BNB/USDT"   onclick="selectPair('BNB/USDT')">BNB/USDT</button>
+      <button class="btn" id="p-SOL/USDT"   onclick="selectPair('SOL/USDT')">SOL/USDT</button>
       <button class="btn" id="p-MATIC/USDT" onclick="selectPair('MATIC/USDT')">MATIC/USDT</button>
+    </div>
+    <div class="btn-row" id="sol-pair-row" style="display:none">
+      <button class="btn" id="p-SOL/USDC"   onclick="selectPair('SOL/USDC')">SOL/USDC</button>
+      <button class="btn" id="p-BTC/USDC"   onclick="selectPair('BTC/USDC')">BTC/USDC</button>
+      <button class="btn" id="p-ETH/USDC"   onclick="selectPair('ETH/USDC')">ETH/USDC</button>
+      <button class="btn" id="p-JUP/USDC"   onclick="selectPair('JUP/USDC')">JUP/USDC</button>
+      <button class="btn" id="p-BONK/USDC"  onclick="selectPair('BONK/USDC')">BONK/USDC</button>
+      <button class="btn" id="p-WIF/USDC"   onclick="selectPair('WIF/USDC')">WIF/USDC</button>
     </div>
 
     <div style="display:flex;gap:10px;margin-top:8px;flex-wrap:wrap">
@@ -943,8 +951,18 @@ function selectExch(e) {
 
 function selectChain(c) {
   sel.chain=c;
+  sel.pair=null;
   document.querySelectorAll('[id^="c-"]').forEach(b=>b.classList.remove("active-chain"));
-  document.getElementById("c-"+c).classList.add("active-chain");
+  document.getElementById("c-"+c) && document.getElementById("c-"+c).classList.add("active-chain");
+  document.querySelectorAll('[id^="p-"]').forEach(b=>b.classList.remove("active-pair"));
+  // Show Solana pairs or EVM pairs
+  if(c==="solana") {
+    document.getElementById("pair-row").style.display="none";
+    document.getElementById("sol-pair-row").style.display="flex";
+  } else {
+    document.getElementById("pair-row").style.display="flex";
+    document.getElementById("sol-pair-row").style.display="none";
+  }
   updateBtn();
 }
 
@@ -1055,7 +1073,11 @@ class Handler(BaseHTTPRequestHandler):
         elif path=="/stop":
             stop_bot()
             self.respond(200,"application/json",b'{"ok":true}')
-        elif path=="/arb":
+        elif path=="/toggle_paper":
+            state["paper_trading"] = not state["paper_trading"]
+            mode = "PAPER" if state["paper_trading"] else "LIVE"
+            log("Switched to "+mode+" trading mode")
+            self.respond(200,"application/json",json.dumps({"paper_trading":state["paper_trading"]}).encode())
             opps=scan_arbitrage()
             self.respond(200,"application/json",json.dumps(opps).encode())
         else:
