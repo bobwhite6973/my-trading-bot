@@ -202,10 +202,18 @@ def cex_place_order(pair, side, amount):
             return data.get("result",{}).get("orderId")
         elif exchange == "lbank":
             import ccxt
-            ex = ccxt.lbank({'apiKey': cfg['api_key'], 'secret': cfg['api_secret']})
+            ex = ccxt.lbank({
+                'apiKey': cfg['api_key'],
+                'secret': cfg['api_secret'],
+                'options': {'createMarketBuyOrderRequiresPrice': False},
+            })
             lsym = pair.replace("/","/")
             lside = 'buy' if 'buy' in side.lower() else 'sell'
-            order = ex.create_market_order(lsym, lside, amount)
+            # Market buy needs cost (quote amount), market sell needs quantity (base amount)
+            if lside == 'buy':
+                order = ex.create_market_buy_order(lsym, amount)
+            else:
+                order = ex.create_market_sell_order(lsym, amount)
             if order.get('id'):
                 return order['id']
     except Exception as ex:
