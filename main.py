@@ -129,9 +129,15 @@ def _get_cex_exchange(name):
         import ccxt
         opts = {'apiKey': cfg['api_key'], 'secret': cfg['api_secret']}
         if name == 'lbank':
-            opts['options'] = {'createMarketBuyOrderRequiresPrice': False}
+            opts['options'] = {
+                'createMarketBuyOrderRequiresPrice': False,
+            }
         ex = getattr(ccxt, name)(opts)
         ex.load_markets()
+        # Force LBank to use HmacSHA256 regardless of secret length
+        if name == 'lbank':
+            ex.options['createOrder'] = ex.options.get('createOrder', {})
+            ex.options['createOrder']['method'] = 'spotPrivatePostSupplementCreateOrder'
         _cex_exchanges[name] = ex
     return _cex_exchanges[name]
 
@@ -241,30 +247,21 @@ def cex_place_order(pair, side, amount):
         elif exchange == "lbank":
             lside = 'buy' if 'buy' in side.lower() else 'sell'
             try:
-                # Get the market details from ccxt
                 ex = _get_cex_exchange('lbank')
-                market = ex.market(pair)
-                symbol_id = market['id']  # "btc_usdt"
-                log("LBank with symbol: " + symbol_id, "INFO")
-                
                 if lside == 'buy':
                     cost = amount * state.get("price", 1)
-                    # Try uppercase symbol via params override
                     order = ex.create_order(pair, 'market', 'buy', cost, None, {
                         'createMarketBuyOrderRequiresPrice': False,
-                        'symbol': symbol_id.upper(),
                     })
                 else:
-                    order = ex.create_order(pair, 'market', 'sell', amount, None, {
-                        'symbol': symbol_id.upper(),
-                    })
+                    order = ex.create_order(pair, 'market', 'sell', amount, None)
                 oid = order.get('id')
                 if oid:
                     return oid
                 info = order.get('info', {})
-                log("LBank response: " + str(info)[:200], "WARN")
+                log("LBank: " + str(info)[:200], "WARN")
             except Exception as e:
-                log("LBank error: " + str(e)[:200], "WARN")
+                log("LBank: " + str(e)[:200], "WARN")
         elif exchange == "okx":
             import base64, datetime
             ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.000Z')
