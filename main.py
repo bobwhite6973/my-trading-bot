@@ -668,22 +668,32 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
 
         # Build Raydium swap transaction payload
         swap_payload = {
-            "computeUnitPrice": "auto",
-            "computeUnitBudget": "auto",
-            "prioritizationFeeLamports": 10000,
-            "quoteResponse": raydium_quote["data"],
-            "userPublicKey": wallet,
-            "wrapAndUnwrapSol": True,
-            "dynamicComputeUnitLimit": True,
+            "computeUnitPriceMicroLamports": "10000",
+            "swapResponse":  raydium_quote,
+            "txVersion":     "V0",
+            "wallet":        wallet,
+            "wrapSol":       from_token == "SOL",
+            "unwrapSol":     to_token   == "SOL",
         }
+        log("Raydium swap payload keys: "+str(list(swap_payload.keys())), "DEBUG")
         r = requests.post("https://transaction-v1.raydium.io/transaction/swap-base-in",
             json=swap_payload, timeout=15)
+        log("Raydium TX status: "+str(r.status_code)+" body: "+r.text[:200])
         tx_data = r.json()
-        if not tx_data.get("success") or not tx_data.get("data",{}).get("transaction"):
+        if not tx_data.get("success") or not tx_data.get("data"):
             log("Raydium tx build failed: "+str(tx_data.get("msg",""))[:100], "WARN")
             return False, 0.0
 
-        tx_b64 = tx_data["data"]["transaction"]
+        txs = tx_data.get("data", [])
+        if isinstance(txs, list) and len(txs) > 0:
+            tx_b64 = txs[0].get("transaction", "")
+        elif isinstance(txs, dict):
+            tx_b64 = txs.get("transaction", "")
+        else:
+            tx_b64 = ""
+        if not tx_b64:
+            log("No transaction in Raydium response", "WARN")
+            return False, 0.0
         raw_tx = b64.b64decode(tx_b64)
         tx_obj = VersionedTransaction.from_bytes(raw_tx)
         sig = keypair.sign_message(solders_message.to_bytes_versioned(tx_obj.message))
