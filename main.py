@@ -857,7 +857,7 @@ def jupiter_swap(from_token, to_token, amount_input, price, dex=None):
             "jsonrpc":"2.0","id":1,"method":"sendTransaction",
             "params":[
                 b64.b64encode(bytes(signed_tx)).decode(),
-                {"encoding":"base64","skipPreflight":True,
+                {"encoding":"base64","skipPreflight":False,
                  "preflightCommitment":"confirmed","maxRetries":3}
             ]
         }
@@ -872,12 +872,22 @@ def jupiter_swap(from_token, to_token, amount_input, price, dex=None):
 
         tx_sig = result.get("result","")
         if tx_sig:
-            log("SWAP EXECUTED: "+tx_sig[:20]+"... "+from_token+"→"+to_token+via)
-            trade = {"time":time.strftime("%H:%M:%S"),"side":"LIVE-"+side+via,
-                     "price":price,"amount":out_human,"router":"Raydium",
-                     "chain":"solana","tx":tx_sig[:20]}
-            state["trades"].append(trade)
-            return True, out_human
+            # Wait briefly and verify the transaction was confirmed
+            time.sleep(2)
+            verify_payload = {"jsonrpc":"2.0","id":1,"method":"getSignatureStatuses","params":[[tx_sig]]}
+            vr = requests.post(send_rpc, json=verify_payload, timeout=8)
+            vdata = vr.json()
+            status = vdata.get("result",{}).get("value",[None])[0]
+            if status and status.get("confirmationStatus") in ("confirmed","finalized"):
+                log("SWAP CONFIRMED: "+tx_sig[:20]+"... "+from_token+"→"+to_token+via)
+                trade = {"time":time.strftime("%H:%M:%S"),"side":"LIVE-"+side+via,
+                         "price":price,"amount":out_human,"router":"Raydium",
+                         "chain":"solana","tx":tx_sig[:20]}
+                state["trades"].append(trade)
+                return True, out_human
+            else:
+                log("Swap submitted but not confirmed yet: "+tx_sig[:20], "WARN")
+                return False, 0.0
         else:
             log("Send failed: "+str(result.get("error",""))[:100], "WARN")
             return False, 0.0
