@@ -658,7 +658,9 @@ def jupiter_swap(from_token, to_token, amount_input, price, dex=None):
     lamports = int(amount_input * (10 ** from_dec))
     log("Swap "+side+via+": "+str(amount_input)+" "+from_token+" → "+to_token)
 
-    # Get quote from Jupiter
+    # Get quote from Jupiter (with Raydium fallback)
+    quote = None
+    out_human = 0.0
     try:
         r = requests.get("https://quote-api.jup.ag/v6/quote", params={
             "inputMint": from_mint,
@@ -666,15 +668,28 @@ def jupiter_swap(from_token, to_token, amount_input, price, dex=None):
             "amount": str(lamports),
             "slippageBps": "100",
         }, timeout=10)
-        quote = r.json()
-        if not quote or quote.get("error"):
-            log("Jupiter quote failed: "+str(quote.get("error","no data")), "WARN")
-            return False, 0.0
-        out_amount = int(quote.get("outAmount", 0))
-        out_human = out_amount / (10 ** to_dec) if out_amount > 0 else 0.0
-        log("Quote: "+str(amount_input)+" "+from_token+" → "+str(round(out_human,6))+" "+to_token)
+        qdata = r.json()
+        if qdata and not qdata.get("error"):
+            quote = qdata
+            out_amount = int(quote.get("outAmount", 0))
+            out_human = out_amount / (10 ** to_dec) if out_amount > 0 else 0.0
+            log("Jupiter quote: "+str(amount_input)+" "+from_token+" → "+str(round(out_human,6))+" "+to_token)
     except Exception as e:
-        log("Jupiter quote error: "+str(e)[:80], "WARN")
+        log("Jupiter unavailable, trying Raydium...", "WARN")
+
+    if not quote or out_human <= 0:
+        # Fallback: Raydium direct quote
+        slippage = "100" if side == "BUY" else "300"
+        rq = raydium_get_quote(from_mint, to_mint, lamports, slippage)
+        if rq:
+            out_lamports = int(rq.get("data",{}).get("outputAmount", 0))
+            out_human = out_lamports / (10 ** to_dec) if out_lamports > 0 else 0.0
+            if out_human > 0:
+                log("Raydium quote: "+str(amount_input)+" "+from_token+" → "+str(round(out_human,6))+" "+to_token)
+                # Use Raydium for the swap
+                return _execute_raydium_swap(from_token, to_token, from_mint, to_mint, 
+                    amount_input, out_human, price, side, via, lamports, rq, to_dec)
+        log("All quotes failed — swap aborted", "WARN")
         return False, 0.0
 
     if state["paper_trading"]:
