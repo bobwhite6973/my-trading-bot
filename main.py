@@ -239,18 +239,33 @@ def cex_place_order(pair, side, amount):
             data = r.json()
             return data.get("result",{}).get("orderId")
         elif exchange == "lbank":
-            ex = _get_cex_exchange('lbank')
-            lsym = pair  # ccxt handles symbol normalization internally
+            # Direct LBank API call using REST (bypass ccxt for reliability)
+            import ccxt as _ccxt
+            lbank_ccxt = _get_cex_exchange('lbank')
+            lsym = pair.replace("/", "_").lower()  # LBank format: btc_usdt
             lside = 'buy' if 'buy' in side.lower() else 'sell'
+            # Sign the request manually
+            ts = str(int(time.time() * 1000))
             if lside == 'buy':
-                cost = amount * state.get("price", 1)
-                order = ex.create_order(lsym, 'market', 'buy', cost, None, {
-                    'createMarketBuyOrderRequiresPrice': False,
-                })
+                # Market buy: cost in USDT
+                cost = str(round(amount * state.get("price", 1), 2))
+                params_str = "symbol=" + lsym + "&type=buy_market&price=" + cost
             else:
-                order = ex.create_order(lsym, 'market', 'sell', amount, None)
-            if order.get('id'):
-                return order['id']
+                amt_str = str(round(amount, 8))
+                params_str = "symbol=" + lsym + "&type=sell_market&amount=" + amt_str
+            sign_str = params_str + "&api_key=" + cfg['api_key'] + "&secret_key=" + cfg['api_secret']
+            sign = hashlib.md5(sign_str.encode()).hexdigest().upper()
+            post_data = params_str + "&api_key=" + cfg['api_key'] + "&sign=" + sign
+            r = requests.post("https://api.lbank.info/v2/supplement/create_order.do",
+                data=post_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=10)
+            resp = r.json()
+            log("LBank order response: " + str(resp)[:120])
+            if resp.get("result") and resp.get("data", {}).get("order_id"):
+                return resp["data"]["order_id"]
+            elif not resp.get("result"):
+                log("LBank order failed: " + str(resp.get("error_code", "unknown")), "WARN")
         elif exchange == "okx":
             import base64, datetime
             ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.000Z')
