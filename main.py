@@ -221,7 +221,7 @@ def cex_place_order(pair, side, amount):
                 'secret': cfg['api_secret'],
                 'options': {'createMarketBuyOrderRequiresPrice': False},
             })
-            lsym = pair.replace("/", "_").lower()  # LBank expects btc_usdt format
+            lsym = pair  # ccxt handles symbol normalization internally
             lside = 'buy' if 'buy' in side.lower() else 'sell'
             if lside == 'buy':
                 order = ex.create_market_buy_order(lsym, amount)
