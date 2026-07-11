@@ -239,20 +239,25 @@ def cex_place_order(pair, side, amount):
             data = r.json()
             return data.get("result",{}).get("orderId")
         elif exchange == "lbank":
-            ex = _get_cex_exchange('lbank')
             lside = 'buy' if 'buy' in side.lower() else 'sell'
             try:
-                # Get the market ID that ccxt uses (e.g. "btc_usdt")
+                # Get the market details from ccxt
+                ex = _get_cex_exchange('lbank')
                 market = ex.market(pair)
-                symbol_id = market['id']  # This is what ccxt sends to the API
-                log("LBank using symbol: " + symbol_id + " for pair: " + pair, "INFO")
+                symbol_id = market['id']  # "btc_usdt"
+                log("LBank with symbol: " + symbol_id, "INFO")
+                
                 if lside == 'buy':
                     cost = amount * state.get("price", 1)
+                    # Try uppercase symbol via params override
                     order = ex.create_order(pair, 'market', 'buy', cost, None, {
                         'createMarketBuyOrderRequiresPrice': False,
+                        'symbol': symbol_id.upper(),
                     })
                 else:
-                    order = ex.create_order(pair, 'market', 'sell', amount, None)
+                    order = ex.create_order(pair, 'market', 'sell', amount, None, {
+                        'symbol': symbol_id.upper(),
+                    })
                 oid = order.get('id')
                 if oid:
                     return oid
