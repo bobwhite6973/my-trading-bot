@@ -115,7 +115,7 @@ CEX_CONFIGS = {
     "okx":     {"base":"https://www.okx.com","sign":"sha256"},
     "kraken":  {"base":"https://api.kraken.com","sign":"sha512"},
     "kucoin":  {"base":"https://api.kucoin.com","sign":"sha256"},
-    "lbank":   {"base":"https://api.lbank.com","sign":"md5"},
+    "lbank":   {"base":"https://api.lbank.info","sign":"md5"},
 }
 
 def cex_get_balance():
@@ -161,7 +161,7 @@ def cex_get_balance():
             query = "&".join(k+"="+str(v) for k,v in sorted(params.items()))
             sign = hmac.new(cfg["api_secret"].encode(), query.encode(), hashlib.md5).hexdigest().upper()
             params["sign"] = sign
-            r = requests.post("https://api.lbank.com/v2/supplement/user_info.do", data=params, timeout=5)
+            r = requests.post("https://api.lbank.info/v1/user_info.do", data=params, timeout=5)
             data = r.json()
             if data.get("result")=="true":
                 usdt = float(data.get("info",{}).get("free",{}).get("usdt",0))
