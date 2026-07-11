@@ -1170,7 +1170,9 @@ def place_order(pair, side, amount):
         if chain == "solana":
             # Use Jupiter/Raydium for Solana trades
             if side in ("buy","buy_market"):
-                return jupiter_swap(stablecoin, token, amount, price, dex="Raydium")
+                # amount is token quantity, jupiter_swap needs USDC cost
+                cost = amount * price
+                return jupiter_swap(stablecoin, token, cost, price, dex="Raydium")
             else:
                 return jupiter_swap(token, stablecoin, amount, price, dex="Raydium")
         else:
