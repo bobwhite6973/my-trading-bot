@@ -804,16 +804,15 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
         signed_tx = VersionedTransaction.populate(tx_obj.message, [sig])
 
         # Submit
-        send_payload = {
+        rpc = ("https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY) if ALCHEMY_KEY else "https://api.mainnet-beta.solana.com"
+        r2 = requests.post(rpc, json={
             "jsonrpc":"2.0","id":1,"method":"sendTransaction",
             "params":[
                 b64.b64encode(bytes(signed_tx)).decode(),
-                {"encoding":"base64","skipPreflight":False,
-                 "preflightCommitment":"confirmed","maxRetries":3}
+                {"encoding":"base64","skipPreflight":True,
+                 "preflightCommitment":"confirmed","maxRetries":5}
             ]
-        }
-        rpc = ("https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY) if ALCHEMY_KEY else "https://api.mainnet-beta.solana.com"
-        r2 = requests.post(rpc, json=send_payload, timeout=15)
+        }, timeout=20)
         result = r2.json()
 
         tx_sig = result.get("result","")
@@ -878,8 +877,8 @@ def jupiter_swap(from_token, to_token, amount_input, price, dex=None):
 
     if not quote or out_human <= 0:
         # Fallback: Raydium direct quote
-        slippage = "100" if side == "BUY" else "300"
-        rq = raydium_get_quote(from_mint, to_mint, lamports, slippage)
+        slippage_bps = "300"  # 3% slippage for thin BTC pool
+        rq = raydium_get_quote(from_mint, to_mint, lamports, slippage_bps)
         if rq:
             out_lamports = int(rq.get("data",{}).get("outputAmount", 0))
             out_human = out_lamports / (10 ** to_dec) if out_lamports > 0 else 0.0
