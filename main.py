@@ -265,7 +265,6 @@ def cex_place_order(pair, side, amount):
             # Build signature string (sorted alphabetically)
             params['api_key'] = cfg['api_key']
             params['timestamp'] = timestamp
-            params['signature_method'] = signature_method
             params['echostr'] = echostr
 
             sorted_keys = sorted(params.keys())
