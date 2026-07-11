@@ -530,7 +530,12 @@ SOL_TOKENS = {
 
 def sol_get_balance():
     """Get SOL + USDC + USDT balance. Tries multiple RPC endpoints for reliability."""
-    SOL_RPCS = [SOL_RPC, "https://rpc.ankr.com/solana"]
+    SOL_RPCS = [
+        "https://api.mainnet-beta.solana.com",
+        "https://solana-api.projectserum.com",
+        "https://rpc.ankr.com/solana",
+        "https://solana.public-rpc.com",
+    ]
     if ALCHEMY_KEY:
         SOL_RPCS = ["https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY] + SOL_RPCS
 
