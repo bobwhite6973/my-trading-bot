@@ -244,7 +244,7 @@ def cex_place_order(pair, side, amount):
             lsym = pair.replace("/", "_").lower()  # LBank format: btc_usdt
             lside = 'buy' if 'buy' in side.lower() else 'sell'
             timestamp = str(int(time.time() * 1000))
-            echostr = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
+            echostr = ''.join(random.choices(string.ascii_letters + string.digits, k=35))
             signature_method = 'MD5'
 
             if lside == 'buy':
