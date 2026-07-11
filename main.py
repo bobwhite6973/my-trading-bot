@@ -666,6 +666,108 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
 
         keypair = Keypair.from_base58_string(private_key)
 
+        # ── ATA helpers ────────────────────────────────────────────────────
+        def get_ata(wallet_addr, mint_addr):
+            """Find existing Associated Token Account for a wallet+mint."""
+            rpcs = ["https://api.mainnet-beta.solana.com",
+                    "https://solana-api.projectserum.com"]
+            if ALCHEMY_KEY:
+                rpcs = ["https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY] + rpcs
+            payload = {
+                "jsonrpc":"2.0","id":1,
+                "method":"getTokenAccountsByOwner",
+                "params":[wallet_addr, {"mint":mint_addr}, {"encoding":"jsonParsed"}]
+            }
+            for rpc in rpcs:
+                try:
+                    r = requests.post(rpc, json=payload, timeout=8)
+                    accs = r.json().get("result",{}).get("value",[])
+                    if accs:
+                        return accs[0].get("pubkey")
+                except:
+                    continue
+            return None
+
+        def create_ata_if_missing(wallet_addr, mint_addr):
+            """Create ATA on-chain if missing, return its address."""
+            existing = get_ata(wallet_addr, mint_addr)
+            if existing:
+                return existing
+            log("Creating ATA for mint "+mint_addr[:8]+"...", "WARN")
+            try:
+                from solders.pubkey import Pubkey
+                from solders.hash import Hash
+                from solders.instruction import AccountMeta, Instruction
+                from solders.message import MessageV0
+
+                wallet_pk  = Pubkey.from_string(wallet_addr)
+                mint_pk    = Pubkey.from_string(mint_addr)
+                token_prog = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+                ata_prog   = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bsU")
+                sys_prog   = Pubkey.from_string("11111111111111111111111111111111")
+
+                seeds = [bytes(wallet_pk), bytes(token_prog), bytes(mint_pk)]
+                ata_pk, _ = Pubkey.find_program_address(seeds, ata_prog)
+
+                # Get blockhash
+                bh_r = requests.post("https://api.mainnet-beta.solana.com", json={
+                    "jsonrpc":"2.0","id":1,"method":"getLatestBlockhash",
+                    "params":[{"commitment":"confirmed"}]
+                }, timeout=8)
+                blockhash_str = bh_r.json().get("result",{}).get("value",{}).get("blockhash","")
+                if not blockhash_str:
+                    log("Could not get blockhash", "WARN")
+                    return None
+
+                blockhash = Hash.from_string(blockhash_str)
+
+                create_ix = Instruction(
+                    ata_prog,
+                    bytes([0]),
+                    [
+                        AccountMeta(wallet_pk, True, True),    # payer
+                        AccountMeta(ata_pk,    False, True),   # ata
+                        AccountMeta(wallet_pk, False, False),  # owner
+                        AccountMeta(mint_pk,   False, False),  # mint
+                        AccountMeta(sys_prog,  False, False),  # system program
+                        AccountMeta(token_prog,False, False),  # token program
+                    ]
+                )
+                msg = MessageV0.try_compile(wallet_pk, [create_ix], [], blockhash)
+                tx = VersionedTransaction(msg, [keypair])
+
+                send_payload = {
+                    "jsonrpc":"2.0","id":1,"method":"sendTransaction",
+                    "params":[b64.b64encode(bytes(tx)).decode(),
+                              {"encoding":"base64","skipPreflight":False,
+                               "preflightCommitment":"confirmed"}]
+                }
+                rpc = "https://api.mainnet-beta.solana.com"
+                if ALCHEMY_KEY:
+                    rpc = "https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY
+                rr = requests.post(rpc, json=send_payload, timeout=15)
+                log("ATA creation tx: "+str(rr.json().get("result",""))[:30], "INFO")
+                time.sleep(2)
+                return str(ata_pk)
+            except Exception as ate:
+                log("ATA creation error: "+str(ate)[:80], "WARN")
+                return get_ata(wallet_addr, mint_addr)  # might exist now
+
+        input_ata  = get_ata(wallet, from_mint)
+        if not input_ata:
+            log("No ATA for input token "+from_token+", trying to create...", "WARN")
+            input_ata = create_ata_if_missing(wallet, from_mint)
+        if not input_ata:
+            log("Cannot swap — no input ATA for "+from_token, "WARN")
+            return False, 0.0
+
+        output_ata = get_ata(wallet, to_mint)
+        if not output_ata:
+            output_ata = create_ata_if_missing(wallet, to_mint)
+        if not output_ata:
+            log("Cannot swap — no output ATA for "+to_token, "WARN")
+            return False, 0.0
+
         # Build Raydium swap transaction payload
         swap_payload = {
             "computeUnitPriceMicroLamports": "10000",
@@ -674,6 +776,8 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
             "wallet":        wallet,
             "wrapSol":       from_token == "SOL",
             "unwrapSol":     to_token   == "SOL",
+            "inputAccount":  input_ata,
+            "outputAccount": output_ata,
         }
         log("Raydium swap payload keys: "+str(list(swap_payload.keys())), "DEBUG")
         r = requests.post("https://transaction-v1.raydium.io/transaction/swap-base-in",
