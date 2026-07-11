@@ -245,7 +245,7 @@ def cex_place_order(pair, side, amount):
             lside = 'buy' if 'buy' in side.lower() else 'sell'
             timestamp = str(int(time.time() * 1000))
             echostr = ''.join(random.choices(string.ascii_letters + string.digits, k=35))
-            signature_method = 'MD5'
+            signature_method = 'md5'
 
             if lside == 'buy':
                 cost = str(round(amount * state.get("price", 1), 2))
