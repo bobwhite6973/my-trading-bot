@@ -121,6 +121,15 @@ CEX_CONFIGS = {
 
 def cex_get_balance():
     exchange = state["exchange"]
+    # Rate-limit self-protection: don't check more than once per 60s per exchange
+    now = time.time()
+    last_check = state.get("_last_balance_check", {})
+    last_time = last_check.get(exchange, 0)
+    if now - last_time < 60:
+        return state.get("balance", 0.0)
+    last_check[exchange] = now
+    state["_last_balance_check"] = last_check
+
     try:
         if exchange == "binance":
             ts = str(int(time.time()*1000))
@@ -466,7 +475,7 @@ def start_background_loops():
                     sol_get_balance()
             except Exception as ex:
                 log("Balance loop error: "+str(ex), "ERROR")
-            time.sleep(20)
+            time.sleep(120)
 
     def arb_loop():
         while True:
