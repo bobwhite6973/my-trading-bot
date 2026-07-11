@@ -6,7 +6,7 @@ DEX mode: Wallet-based trading via Uniswap/1inch on any EVM chain
 Price feeds: Kraken (no key needed)
 Strategies: DCA, Grid, Scalping, Copy Trading, Arbitrage
 """
-import os, json, time, hmac, hashlib, threading, requests, logging, base64
+import os, json, time, hmac, hashlib, threading, requests, logging, base64, random, string
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
@@ -239,33 +239,49 @@ def cex_place_order(pair, side, amount):
             data = r.json()
             return data.get("result",{}).get("orderId")
         elif exchange == "lbank":
-            # Direct LBank API call using REST (bypass ccxt for reliability)
-            import ccxt as _ccxt
-            lbank_ccxt = _get_cex_exchange('lbank')
+            # Direct LBank supplement API call
+            import random, string
             lsym = pair.replace("/", "_").lower()  # LBank format: btc_usdt
             lside = 'buy' if 'buy' in side.lower() else 'sell'
-            # Sign the request manually
-            ts = str(int(time.time() * 1000))
+            timestamp = str(int(time.time() * 1000))
+            echostr = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
+            signature_method = 'MD5'
+
             if lside == 'buy':
-                # Market buy: cost in USDT
                 cost = str(round(amount * state.get("price", 1), 2))
-                params_str = "symbol=" + lsym + "&type=buy_market&price=" + cost
+                params = {
+                    'symbol': lsym,
+                    'type': 'buy_market',
+                    'price': cost,
+                }
             else:
                 amt_str = str(round(amount, 8))
-                params_str = "symbol=" + lsym + "&type=sell_market&amount=" + amt_str
-            sign_str = params_str + "&api_key=" + cfg['api_key'] + "&secret_key=" + cfg['api_secret']
+                params = {
+                    'symbol': lsym,
+                    'type': 'sell_market',
+                    'amount': amt_str,
+                }
+
+            # Build signature string (sorted alphabetically)
+            params['api_key'] = cfg['api_key']
+            params['timestamp'] = timestamp
+            params['signature_method'] = signature_method
+            params['echostr'] = echostr
+
+            sorted_keys = sorted(params.keys())
+            sign_str = '&'.join([k + '=' + params[k] for k in sorted_keys])
+            sign_str += '&secret_key=' + cfg['api_secret']
             sign = hashlib.md5(sign_str.encode()).hexdigest().upper()
-            post_data = params_str + "&api_key=" + cfg['api_key'] + "&sign=" + sign
+
+            params['sign'] = sign
             r = requests.post("https://api.lbank.info/v2/supplement/create_order.do",
-                data=post_data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                timeout=10)
+                data=params, timeout=10)
             resp = r.json()
-            log("LBank order response: " + str(resp)[:120])
+            log("LBank order response: " + str(resp)[:150])
             if resp.get("result") and resp.get("data", {}).get("order_id"):
                 return resp["data"]["order_id"]
-            elif not resp.get("result"):
-                log("LBank order failed: " + str(resp.get("error_code", "unknown")), "WARN")
+            else:
+                log("LBank order failed: " + str(resp.get("error_code", resp.get("msg", "unknown"))), "WARN")
         elif exchange == "okx":
             import base64, datetime
             ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.000Z')
