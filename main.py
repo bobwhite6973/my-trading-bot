@@ -746,9 +746,18 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
                 if ALCHEMY_KEY:
                     rpc = "https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY
                 rr = requests.post(rpc, json=send_payload, timeout=15)
-                log("ATA creation tx: "+str(rr.json().get("result",""))[:30], "INFO")
-                time.sleep(2)
-                return str(ata_pk)
+                rr_result = rr.json().get("result","")
+                log("ATA creation tx: "+str(rr_result)[:40], "INFO")
+                if rr_result:
+                    # Wait for confirmation and verify
+                    time.sleep(3)
+                    for _ in range(5):
+                        existing = get_ata(wallet_addr, mint_addr)
+                        if existing:
+                            return existing
+                        time.sleep(2)
+                log("ATA not confirmed after creation, trying again...", "WARN")
+                return get_ata(wallet_addr, mint_addr)
             except Exception as ate:
                 log("ATA creation error: "+str(ate)[:80], "WARN")
                 return get_ata(wallet_addr, mint_addr)  # might exist now
@@ -822,7 +831,8 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
             vr = requests.post(rpc, json=verify_payload, timeout=8)
             vdata = vr.json()
             vresult = vdata.get("result",{}).get("value",[{}])[0]
-            if vresult and vresult.get("confirmationStatus") in ("confirmed","finalized"):
+            tx_ok = vresult and vresult.get("confirmationStatus") in ("confirmed","finalized") and vresult.get("err") is None
+            if tx_ok:
                 log("RAYDIUM SWAP CONFIRMED: "+tx_sig[:20]+"... "+from_token+"→"+to_token+via)
                 trade = {"time":time.strftime("%H:%M:%S"),"side":"LIVE-"+side+via,
                          "price":price,"amount":out_human,"router":"Raydium",
@@ -830,8 +840,9 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
                 state["trades"].append(trade)
                 return True, out_human
             else:
-                log("Raydium swap submitted but not confirmed: "+tx_sig[:20], "WARN")
-                return True, out_human  # Still consider it placed
+                err_msg = str(vresult.get("err","")) if vresult else "no status"
+                log("Swap TX failed: "+tx_sig[:20]+" err="+err_msg, "WARN")
+                return False, 0.0
         else:
             log("Raydium send failed: "+str(result.get("error",""))[:100], "WARN")
             return False, 0.0
