@@ -6,7 +6,7 @@ DEX mode: Wallet-based trading via Uniswap/1inch on any EVM chain
 Price feeds: Kraken (no key needed)
 Strategies: DCA, Grid, Scalping, Copy Trading, Arbitrage
 """
-import os, json, time, hmac, hashlib, threading, requests, logging
+import os, json, time, hmac, hashlib, threading, requests, logging, base64
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
@@ -174,6 +174,20 @@ def cex_get_balance():
             for a in data.get("data",[]):
                 if a.get("currency")=="USDT" and a.get("type")=="trade":
                     state["balance"]=float(a.get("available",0)); return state["balance"]
+        elif exchange == "kraken":
+            ts = str(int(time.time()))
+            path = "/0/private/Balance"
+            sig_str = "/0/private/Balance"+hashlib.sha256((str(ts)+"nonce="+ts).encode()).hexdigest()
+            sig = base64.b64encode(hmac.new(cfg["api_secret"].encode(), sig_str.encode(), hashlib.sha512).digest()).decode()
+            r = requests.post("https://api.kraken.com"+path,
+                headers={"API-Key":cfg["api_key"],"API-Sign":sig},
+                data={"nonce": ts}, timeout=5)
+            data = r.json()
+            if not data.get("error"):
+                for asset, bal in data.get("result",{}).items():
+                    if asset in ("USDT", "ZUSD"):
+                        state["balance"] = float(bal)
+                        return float(bal)
     except Exception as ex:
         log("Balance error ("+exchange+"): "+str(ex), "ERROR")
     return 0.0
@@ -209,13 +223,59 @@ def cex_place_order(pair, side, amount):
             })
             lsym = pair.replace("/","/")
             lside = 'buy' if 'buy' in side.lower() else 'sell'
-            # Market buy needs cost (quote amount), market sell needs quantity (base amount)
             if lside == 'buy':
                 order = ex.create_market_buy_order(lsym, amount)
             else:
                 order = ex.create_market_sell_order(lsym, amount)
             if order.get('id'):
                 return order['id']
+        elif exchange == "okx":
+            import base64, datetime
+            ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.000Z')
+            path = "/api/v5/trade/order"
+            body = json.dumps({
+                "instId": sym + "-USDT" if not sym.endswith("USDT") else sym,
+                "tdMode": "cash",
+                "side": side.lower(),
+                "ordType": "market",
+                "sz": str(amount),
+            })
+            sign_str = ts+"POST"+path+body
+            sig = base64.b64encode(hmac.new(cfg["api_secret"].encode(),sign_str.encode(),hashlib.sha256).digest()).decode()
+            r = requests.post("https://www.okx.com"+path,
+                headers={"OK-ACCESS-KEY":cfg["api_key"],"OK-ACCESS-SIGN":sig,"OK-ACCESS-TIMESTAMP":ts,"OK-ACCESS-PASSPHRASE":os.environ.get("OKX_PASSPHRASE",""),"Content-Type":"application/json"},
+                data=body, timeout=10)
+            data = r.json()
+            return data.get("data",[{}])[0].get("ordId")
+        elif exchange == "kucoin":
+            ts = str(int(time.time()*1000))
+            path = "/api/v1/orders"
+            body = json.dumps({
+                "clientOid": ts,
+                "side": side.lower(),
+                "symbol": sym + "-USDT" if not sym.endswith("USDT") else sym,
+                "type": "market",
+                "size": str(amount),
+            })
+            sign_str = ts+"POST"+path+body
+            sig = hmac.new(cfg["api_secret"].encode(), sign_str.encode(), hashlib.sha256).hexdigest()
+            r = requests.post("https://api.kucoin.com"+path,
+                headers={"KC-API-KEY":cfg["api_key"],"KC-API-SIGN":sig,"KC-API-TIMESTAMP":ts,"KC-API-PASSPHRASE":os.environ.get("KUCOIN_PASSPHRASE",""),"Content-Type":"application/json"},
+                data=body, timeout=10)
+            data = r.json()
+            return data.get("data",{}).get("orderId")
+        elif exchange == "kraken":
+            ts = str(int(time.time()))
+            path = "/0/private/AddOrder"
+            post_data = "pair="+sym+"&type="+("buy" if "buy" in side.lower() else "sell")+"&ordertype=market&volume="+str(amount)
+            sig_str = "/0/private/AddOrder"+hashlib.sha256((str(ts)+post_data).encode()).hexdigest()
+            sig = base64.b64encode(hmac.new(cfg["api_secret"].encode(), sig_str.encode(), hashlib.sha512).digest()).decode()
+            r = requests.post("https://api.kraken.com"+path,
+                headers={"API-Key":cfg["api_key"],"API-Sign":sig},
+                data=post_data, timeout=10)
+            data = r.json()
+            if not data.get("error"):
+                return data.get("result",{}).get("txid",[None])[0]
     except Exception as ex:
         log("Order error ("+exchange+"): "+str(ex), "ERROR")
         return None
