@@ -158,11 +158,10 @@ def cex_get_balance():
         elif exchange == "lbank":
             import ccxt
             ex = ccxt.lbank({'apiKey': cfg['api_key'], 'secret': cfg['api_secret']})
-            lsym = pair.replace("/","/")
-            lside = 'buy' if 'buy' in side.lower() else 'sell'
-            order = ex.create_market_order(lsym, lside, amount)
-            if order.get('id'):
-                return order['id']
+            bal = ex.fetch_balance()
+            usdt = bal.get('USDT', {}).get('free', 0)
+            state['balance'] = usdt
+            return usdt
         elif exchange == "kucoin":
             ts = str(int(time.time()*1000))
             path = "/api/v1/accounts"
@@ -201,22 +200,13 @@ def cex_place_order(pair, side, amount):
             data = r.json()
             return data.get("result",{}).get("orderId")
         elif exchange == "lbank":
-            ts = str(int(time.time()*1000))
-            lsym = pair.replace("/","_").lower()
-            lside = "buy_market" if "buy" in side.lower() else "sell_market"
-            params = {"api_key":cfg["api_key"],"symbol":lsym,"type":lside,"price":"-1","amount":str(amount),"timestamp":ts}
-            params["echostr"] = __import__('random').choices(__import__('string').ascii_letters + __import__('string').digits, k=12)
-            query = "&".join(k+"="+str(v) for k,v in sorted(params.items()))
-            sign = hmac.new(cfg["api_secret"].encode(), query.encode(), hashlib.md5).hexdigest().upper()
-            params["sign"] = sign
-            r = requests.post("https://api.lbank.info/v2/supplement/user_info.do", data=params, timeout=5)
-            data = r.json()
-            if data.get("result")=="true": return data.get("order_id")
-            else: log("LBank order error: "+str(data.get("error_code","")), "ERROR")
-        log("Order placed: "+side+" "+str(amount)+" "+pair)
-    except Exception as ex:
-        log("Order error ("+exchange+"): "+str(ex), "ERROR")
-    return None
+            import ccxt
+            ex = ccxt.lbank({'apiKey': cfg['api_key'], 'secret': cfg['api_secret']})
+            lsym = pair.replace("/","/")
+            lside = 'buy' if 'buy' in side.lower() else 'sell'
+            order = ex.create_market_order(lsym, lside, amount)
+            if order.get('id'):
+                return order['id']
 
 # ── DEX Trading ───────────────────────────────────────────────────────────────
 ALCHEMY_KEY = os.environ.get("ALCHEMY_KEY", "")
