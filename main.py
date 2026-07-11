@@ -224,11 +224,16 @@ def cex_place_order(pair, side, amount):
             lsym = pair  # ccxt handles symbol normalization internally
             lside = 'buy' if 'buy' in side.lower() else 'sell'
             if lside == 'buy':
-                # LBank market buy: amount = cost (USDT), not quantity
-                cost = amount * state.get("price", 0)
-                order = ex.create_market_buy_order(lsym, cost if cost > 0 else amount)
+                # LBank market buy: amount is the cost (USDT to spend)
+                cost = amount * state.get("price", 1)
+                order = ex.create_order(lsym, 'market', 'buy', cost, None, {
+                    'method': 'spotPrivatePostCreateOrder',
+                    'createMarketBuyOrderRequiresPrice': False,
+                })
             else:
-                order = ex.create_market_sell_order(lsym, amount)
+                order = ex.create_order(lsym, 'market', 'sell', amount, None, {
+                    'method': 'spotPrivatePostCreateOrder',
+                })
             if order.get('id'):
                 return order['id']
         elif exchange == "okx":
