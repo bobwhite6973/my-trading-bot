@@ -1422,8 +1422,7 @@ td{padding:8px 0;border-bottom:1px solid #0f0f0f;color:#888}
       <button class="btn" id="p-ETH/USDC"   onclick="selectPair('ETH/USDC')">ETH/USDC</button>
       <button class="btn" id="p-JUP/USDC"   onclick="selectPair('JUP/USDC')">JUP/USDC</button>
       <button class="btn" id="p-WIF/USDC"   onclick="selectPair('WIF/USDC')">WIF/USDC</button>
-      <button class="btn" id="p-JUP/USDC"   onclick="selectPair('JUP/USDC')">JUP/USDC</button>
-    </div>
+              </div>
 
     <div style="display:flex;gap:10px;margin-top:8px;flex-wrap:wrap">
       <button class="btn-start" id="start-btn" onclick="startBot()" disabled>Select options above</button>
