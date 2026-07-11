@@ -17,7 +17,7 @@ cfg = {
     # CEX
     "api_key":      os.environ.get("API_KEY", ""),
     "api_secret":   os.environ.get("API_SECRET", ""),
-    "exchange":     os.environ.get("EXCHANGE", "lbank"),
+    "exchange":     os.environ.get("EXCHANGE", "bybit"),
     # DEX/EVM
     "wallet":       os.environ.get("WALLET_ADDRESS", ""),
     "private_key":  os.environ.get("PRIVATE_KEY", ""),
@@ -25,14 +25,14 @@ cfg = {
     "sol_wallet":   os.environ.get("SOL_WALLET_ADDRESS", ""),
     "sol_key":      os.environ.get("SOL_PRIVATE_KEY", ""),
     # Trading
-    "pair":         os.environ.get("TRADING_PAIR", "BTC/USDT"),
+    "pair":         os.environ.get("TRADING_PAIR", "SOL/USDC"),
     "risk_pct":     float(os.environ.get("RISK_PCT", "2")),
     "stop_loss":    float(os.environ.get("STOP_LOSS_PCT", "5")),
     "take_profit":  float(os.environ.get("TAKE_PROFIT_PCT", "15")),
     "max_pos":      float(os.environ.get("MAX_POSITION_USD", "500")),
     "max_loss":     float(os.environ.get("MAX_DAILY_LOSS_USD", "200")),
     "source_wallet":os.environ.get("SOURCE_WALLET", ""),
-    # Safety
+    # Safety — default to paper trading to avoid accidental live trades
     "min_arb_spread":  float(os.environ.get("MIN_ARB_SPREAD", "1.5")),
     "paper_trading":   os.environ.get("PAPER_TRADING", "true").lower() != "false",
 }
@@ -207,6 +207,9 @@ def cex_place_order(pair, side, amount):
             order = ex.create_market_order(lsym, lside, amount)
             if order.get('id'):
                 return order['id']
+    except Exception as ex:
+        log("Order error ("+exchange+"): "+str(ex), "ERROR")
+        return None
 
 # ── DEX Trading ───────────────────────────────────────────────────────────────
 ALCHEMY_KEY = os.environ.get("ALCHEMY_KEY", "")

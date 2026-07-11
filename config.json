@@ -1,16 +1,16 @@
 {
   "project": "My Trading Bot",
-  "exchange": "Sniper Bot",
-  "chain": "Ethereum",
-  "api_key": "cc98e459-b52f-4cfd-b490-4c3bca1a1ad7",
-  "api_secret": "A3AB6554A8D35E385A8F5DE79687FA17",
-  "wallet_address": "0xb1567f3cd10b476a7673f2f87c8eca832fccc6a5",
-  "trading_pair": "BTC/ETH",
+  "exchange": "bybit",
+  "chain": "solana",
+  "api_key": "",
+  "api_secret": "",
+  "wallet_address": "",
+  "trading_pair": "SOL/USDC",
   "risk_pct": "2",
   "stop_loss_pct": "5",
   "take_profit_pct": "15",
   "max_position_usd": "500",
   "max_daily_loss_usd": "200",
-  "tg_bot_token": "8868163310:AAFateRzyX1TZwTHWJfCPlHxUWpLW_4SjEQ",
-  "tg_chat_id": "620366831"
+  "tg_bot_token": "",
+  "tg_chat_id": ""
 }
