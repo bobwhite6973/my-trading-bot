@@ -157,17 +157,12 @@ def cex_get_balance():
                     state["balance"]=float(d.get("availBal",0)); return state["balance"]
         elif exchange == "lbank":
             import ccxt
-            exchange_ccxt = ccxt.lbank({
-                'apiKey': cfg['api_key'],
-                'secret': cfg['api_secret'],
-            })
-            try:
-                balance = exchange_ccxt.fetch_balance()
-                usdt = balance.get('USDT', {}).get('free', 0)
-                state['balance'] = usdt
-                return usdt
-            except Exception as e:
-                log(f"LBank error: {str(e)[:80]}", "ERROR")
+            ex = ccxt.lbank({'apiKey': cfg['api_key'], 'secret': cfg['api_secret']})
+            lsym = pair.replace("/","/")
+            lside = 'buy' if 'buy' in side.lower() else 'sell'
+            order = ex.create_market_order(lsym, lside, amount)
+            if order.get('id'):
+                return order['id']
         elif exchange == "kucoin":
             ts = str(int(time.time()*1000))
             path = "/api/v1/accounts"
