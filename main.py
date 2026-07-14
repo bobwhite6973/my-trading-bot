@@ -1562,7 +1562,7 @@ td{padding:8px 0;border-bottom:1px solid #0f0f0f;color:#888}
   <div class="sub"><span class="dot" id="dot"></span><span id="status-text">Stopped</span></div>
 
   <div class="stats">
-    <div class="stat"><div class="sl">Price (Raydium)</div><div class="sv" id="s-price">—</div></div>
+    <div class="stat"><div class="sl">Price (Kraken)</div><div class="sv" id="s-price">—</div></div>
     <div class="stat"><div class="sl">EVM Balance</div><div class="sv" id="s-balance">—</div></div>
     <div class="stat"><div class="sl">Solana</div><div class="sv" id="s-sol-balance" style="font-size:16px">—</div></div>
     <div class="stat"><div class="sl">Total P&L</div><div class="sv" id="s-pnl">$0.00</div></div>
