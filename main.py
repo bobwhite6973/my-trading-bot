@@ -107,15 +107,18 @@ def get_price_raydium(pair):
     """Get price from Raydium pool (matches execution price)."""
     try:
         token = pair.split("/")[0]
+        token_upper = token.upper()
         usdc_mint = SOL_TOKENS.get("USDC", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
-        token_mint = SOL_TOKENS.get(token.upper())
+        token_mint = SOL_TOKENS.get(token_upper)
         if not token_mint:
             return 0.0
-        quote = raydium_get_quote(token_mint, usdc_mint, 10**6, "100")
+        # Quote 1 full unit of the token (correct decimals)
+        decimals = TOKEN_DECIMALS.get(token_upper, 6)
+        one_unit = 10 ** decimals
+        quote = raydium_get_quote(token_mint, usdc_mint, one_unit, "100")
         if quote and quote.get("data") and quote["data"].get("outputAmount"):
-            out = int(quote["data"]["outputAmount"])
-            decimals = TOKEN_DECIMALS.get(token.upper(), 6)
-            price = out / (10**decimals)
+            out = int(quote["data"]["outputAmount"])  # USDC units (6 decimals)
+            price = out / 10**6  # USDC received for 1 token = price in USD
             if price > 0:
                 return price
     except Exception as ex:
