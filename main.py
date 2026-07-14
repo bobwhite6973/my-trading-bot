@@ -112,13 +112,17 @@ def get_price_raydium(pair):
         token_mint = SOL_TOKENS.get(token_upper)
         if not token_mint:
             return 0.0
-        # Quote 1 full unit of the token (correct decimals)
+        # Quote a small amount (0.01 token) to avoid liquidity issues, then scale
         decimals = TOKEN_DECIMALS.get(token_upper, 6)
-        one_unit = 10 ** decimals
-        quote = raydium_get_quote(token_mint, usdc_mint, one_unit, "100")
+        small_amount = 10 ** (decimals - 2)  # 0.01 of the token
+        if small_amount < 1000:
+            small_amount = 10 ** decimals  # fallback to 1 full unit for low-dec tokens
+        quote = raydium_get_quote(token_mint, usdc_mint, small_amount, "100")
         if quote and quote.get("data") and quote["data"].get("outputAmount"):
             out = int(quote["data"]["outputAmount"])  # USDC units (6 decimals)
-            price = out / 10**6  # USDC received for 1 token = price in USD
+            # Scale up: output for 0.01 token * 100 = price for 1 token
+            scale = (10 ** decimals) / small_amount
+            price = (out / 10**6) * scale
             if price > 0:
                 return price
     except Exception as ex:
