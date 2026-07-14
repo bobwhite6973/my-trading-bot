@@ -11,6 +11,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
 logging.basicConfig(level=logging.WARNING)
+TOKEN_DECIMALS = {"USDC": 6, "USDT": 6, "SOL": 9, "BTC": 8, "ETH": 8, "JUP": 6, "BONK": 5, "WIF": 6}
 
 # ── Config from environment ───────────────────────────────────────────────────
 cfg = {
@@ -102,7 +103,30 @@ def get_price_coingecko(token):
     except:
         return 0.0
 
+def get_price_raydium(pair):
+    """Get price from Raydium pool (matches execution price)."""
+    try:
+        token = pair.split("/")[0]
+        usdc_mint = SOL_TOKENS.get("USDC", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+        token_mint = SOL_TOKENS.get(token.upper())
+        if not token_mint:
+            return 0.0
+        quote = raydium_get_quote(token_mint, usdc_mint, 10**6, "100")
+        if quote and quote.get("data") and quote["data"].get("outputAmount"):
+            out = int(quote["data"]["outputAmount"])
+            decimals = TOKEN_DECIMALS.get(token.upper(), 6)
+            price = out / (10**decimals)
+            if price > 0:
+                return price
+    except Exception as ex:
+        log("Raydium price error: "+str(ex), "WARN")
+    return 0.0
+
 def get_price(pair):
+    price = get_price_raydium(pair)
+    if price > 0:
+        state["price"] = price
+        return price
     price = get_price_kraken(pair)
     if price <= 0:
         price = get_price_coingecko(pair)
@@ -856,7 +880,6 @@ def jupiter_swap(from_token, to_token, amount_input, price, dex=None):
     Execute a Solana DEX swap via Jupiter aggregator (v6 API).
     Jupiter routes through all DEXes (Raydium, Orca, Meteora, etc.) for best price.
     """
-    TOKEN_DECIMALS = {"USDC": 6, "USDT": 6, "SOL": 9, "ETH": 8, "JUP": 6, "BONK": 5, "WIF": 6}
     from_mint = SOL_TOKENS.get(from_token, SOL_TOKENS["USDC"])
     to_mint   = SOL_TOKENS.get(to_token,   SOL_TOKENS["SOL"])
     from_dec  = TOKEN_DECIMALS.get(from_token, 6)
@@ -1359,7 +1382,9 @@ def run_grid():
     levels=5; spread=0.05
     grids = [round(price*(1-spread)+i*(price*spread*2/levels),4) for i in range(levels+1)]
     filled = {}
-    log("Grid levels: "+str(grids))
+    # Lower half = buy zone, upper half = sell zone
+    mid_idx = len(grids) // 2
+    log("Grid levels: "+str(grids)+" buy_zone=<="+str(grids[mid_idx]))
     while state["running"] and state["strategy"]=="grid":
         price = get_price(state["pair"])
         if price <= 0: time.sleep(30); continue
@@ -1368,14 +1393,17 @@ def run_grid():
         for i,g in enumerate(grids[:-1]):
             ng = grids[i+1]
             if g <= price < ng:
-                if i not in filled and size > 1:
+                is_buy_zone = i < mid_idx
+                # Buy only in lower half (dip buying)
+                if is_buy_zone and i not in filled and size > 1:
                     amt = round(size/price,6)
                     if place_order(state["pair"],"buy",amt):
                         filled[i]={"price":price,"amount":amt}
                         state["positions"].append({"price":price,"amount":amt,"grid":i,"strategy":"Grid"})
                         record_trade("GRID-BUY",price,amt)
                         log("Grid BUY level "+str(i)+" @ $"+str(price))
-                elif i in filled and price >= filled[i]["price"]*(1+cfg["take_profit"]/100):
+                # Sell at upper levels or take profit
+                elif i in filled and (i >= mid_idx or price >= filled[i]["price"]*(1+cfg["take_profit"]/100)):
                     amt = filled[i]["amount"]
                     if place_order(state["pair"],"sell",amt):
                         pnl=(price-filled[i]["price"])*amt
