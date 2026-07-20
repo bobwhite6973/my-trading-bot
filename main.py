@@ -1957,6 +1957,7 @@ function updateChart(data, gridLevels, gridBuyZone, pair) {
   candleSeries.setData(candles);
   var dataStart = candles[0].time;
   var dataEnd = candles[candles.length - 1].time;
+  chart.timeScale().applyOptions({barSpacing: 3});
   chart.timeScale().fitContent();
 
   // Grid overlay
