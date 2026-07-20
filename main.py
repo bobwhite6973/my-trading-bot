@@ -73,7 +73,7 @@ state = {
     "best_trade":    None,
     "trades_list":   [],
     "positions_list": [],
-    "config":        {"max_leverage": cfg.get("max_leverage", 3), "max_position": cfg.get("max_position", 1000), "cooldown": cfg.get("cooldown", 30), "slippage": cfg.get("slippage", 0.5)},
+    "config":        {"max_leverage": 3, "max_position": 1000, "cooldown": 30, "slippage": 0.5},
     "last_trade":    None,
 }
 
@@ -2195,9 +2195,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/config":
             for key in ["max_leverage", "max_position", "cooldown", "slippage"]:
                 if key in data: cfg[key] = data[key]
-            state["config"] = dict(cfg)
+            state["config"] = {k: cfg.get(k) for k in ["max_leverage", "max_position", "cooldown", "slippage"] if cfg.get(k)}
             log("Config updated: "+json.dumps(data))
-            self.respond(200,"application/json",json.dumps({"status":"ok","config":dict(cfg)}).encode())
+            self.respond(200,"application/json",json.dumps({"status":"ok","config":state["config"]}).encode())
         else:
             self.respond(404,"text/plain",b"Not found")
     
