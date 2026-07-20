@@ -1901,6 +1901,8 @@ function initChart() {
       lineWidth: 2,
       priceFormat: {type: "price", precision: 4, minMove: 0.0001},
     });
+    lineSeries.setData([{time: Math.floor(Date.now()/1000) - 60, value: 100}, {time: Math.floor(Date.now()/1000), value: 100.5}]);
+    chart.timeScale().fitContent();
   } catch(e) { console.log("Chart init error:", e); }
 }
 
