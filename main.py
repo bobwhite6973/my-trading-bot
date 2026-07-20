@@ -1638,7 +1638,7 @@ h1{font-size:22px;font-weight:900;color:var(--text)}
 .dot.on{background:var(--accent);box-shadow:0 0 8px var(--accent)}
 .theme-btn{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px 12px;cursor:pointer;font-size:13px;color:var(--text);transition:all .15s}
 .theme-btn:hover{border-color:var(--accent)}
-#chart-container{height:350px;margin-bottom:20px;border-radius:10px;background:var(--card);border:1px solid var(--border);overflow:hidden;position:relative}
+#chart-container{height:350px;width:50%;margin:0 auto 20px;border-radius:10px;background:var(--card);border:1px solid var(--border);overflow:hidden;position:relative}
 #chart-container iframe{border-radius:10px}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px}
@@ -1958,6 +1958,7 @@ function updateChart(data, gridLevels, gridBuyZone, pair) {
   candleSeries.setData(candles);
   var dataStart = candles[0].time;
   var dataEnd = candles[candles.length - 1].time;
+
 
   // Grid overlay
   if (!gridLevels || gridLevels.length < 2) return;
