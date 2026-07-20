@@ -1954,7 +1954,7 @@ function updateChart(data, gridLevels, gridBuyZone, pair) {
   var dataStart = candles[0].time;
   var dataEnd = candles[candles.length - 1].time;
   var span = Math.max(dataEnd - dataStart, 3600);
-  chart.timeScale().setVisibleRange({from: dataEnd - span * 1.5, to: dataEnd + 60});
+  chart.timeScale().setVisibleRange({from: dataEnd - span * 0.75, to: dataEnd + 60});
 
   // Grid overlay
   if (!gridLevels || gridLevels.length < 2) return;
