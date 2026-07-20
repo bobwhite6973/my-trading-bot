@@ -1351,6 +1351,7 @@ def run_dca():
     log("DCA started on "+state["pair"]+" ("+state["mode"].upper()+")")
     buy_prices = []
     while state["running"] and state["strategy"]=="dca":
+        while state["paused"]: time.sleep(1)
         price = get_price(state["pair"])
         if price <= 0: time.sleep(60); continue
         bal = get_balance()
@@ -1417,6 +1418,12 @@ def run_grid():
     while state["running"] and state["strategy"]=="grid":
         price = get_price(state["pair"])
         if price <= 0: time.sleep(30); continue
+
+        # ── Pause check: wait while paused ──
+        while state["paused"]:
+            time.sleep(1)
+            price = get_price(state["pair"])
+            if price <= 0: time.sleep(5)
 
         # ── Grid re-centering: if price drifts outside grid, rebuild around current price ──
         if (price < grids[0] * 0.98 or price > grids[-1] * 1.02) or (not filled and price >= grids[mid_idx]):
@@ -1512,6 +1519,7 @@ def run_scalp():
     log("Scalping started on "+state["pair"]+" ("+state["mode"].upper()+")")
     prices=[]; position=None
     while state["running"] and state["strategy"]=="scalp":
+        while state["paused"]: time.sleep(1)
         price=get_price(state["pair"])
         if price<=0: time.sleep(10); continue
         prices.append(price)
@@ -1544,6 +1552,7 @@ def run_copy():
     source=cfg["source_wallet"]
     log("Copy Trading watching: "+source)
     while state["running"] and state["strategy"]=="copy":
+        while state["paused"]: time.sleep(1)
         log("Monitoring "+source+" for trades...")
         time.sleep(60)
 
@@ -1552,6 +1561,7 @@ def run_arbitrage():
     chain = state.get("chain","ethereum")
     log("Arbitrage started ["+mode+" MODE] on "+chain+" — min spread: "+str(cfg["min_arb_spread"])+"%")
     while state["running"] and state["strategy"]=="arb":
+        while state["paused"]: time.sleep(1)
         # Don't scan if a trade is in progress
         if state["trading_lock"]:
             time.sleep(5)
@@ -2044,10 +2054,18 @@ function refresh() {
     document.getElementById("s-pnl").innerHTML = d.pnl != null ? pnlHtml(d.pnl) : "$0.00";
     document.getElementById("s-pos").textContent = d.positions != null ? d.positions : 0;
 
+    // Update pause button state
+    if (on) {
+      document.getElementById("pause-btn").style.display = "inline-block";
+      document.getElementById("pause-btn").textContent = d.paused ? "&#9654; Resume" : "&#9208; Pause";
+    } else {
+      document.getElementById("pause-btn").style.display = "none";
+    }
+
     // Update summary cards
     document.getElementById("sm-winrate").textContent = d.win_rate != null ? d.win_rate + "%" : "0%";
     document.getElementById("sm-avgprofit").textContent = d.avg_profit != null ? "$" + d.avg_profit.toFixed(2) : "$0.00";
-    document.getElementById("sm-trades").textContent = d.trades != null ? d.trades : 0;
+    document.getElementById("sm-trades").textContent = d.trades_count != null ? d.trades_count : 0;
     document.getElementById("sm-best").textContent = d.best_trade != null ? "$" + d.best_trade.toFixed(2) : "—";
 
     // Update trade table
