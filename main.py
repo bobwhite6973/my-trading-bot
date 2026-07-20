@@ -75,6 +75,9 @@ state = {
     "positions_list": [],
     "config":        {"max_leverage": 3, "max_position": 1000, "cooldown": 30, "slippage": 0.5},
     "last_trade":    None,
+    "price_history": [],
+    "grid_levels":   [],
+    "grid_buy_zone": 0.0,
 }
 
 def log(msg, level="INFO"):
@@ -513,6 +516,9 @@ def start_background_loops():
                 p = get_price(pair)
                 if p > 0:
                     state["price"] = p
+                    state["price_history"].append({"time": int(time.time()*1000), "value": p})
+                    if len(state["price_history"]) > 200:
+                        state["price_history"] = state["price_history"][-200:]
             except Exception as e:
                 log("price loop error: "+str(e), "WARN")
             time.sleep(5)
@@ -1417,6 +1423,8 @@ def run_grid():
     trailing_low = 0.0
     trailing_buy_active = False
     dip_occurred = False
+    state["grid_levels"] = grids[:]
+    state["grid_buy_zone"] = grids[mid_idx]
     log("Grid levels: "+str(grids)+" buy_zone=<="+str(grids[mid_idx])+" trailing="+str(trailing_pct)+"%")
     while state["running"] and state["strategy"]=="grid":
         price = get_price(state["pair"])
@@ -1441,6 +1449,8 @@ def run_grid():
             trailing_buy_active = False
             trailing_low = 0.0
             dip_occurred = False
+            state["grid_levels"] = grids[:]
+            state["grid_buy_zone"] = grids[mid_idx]
             log("Grid re-centered: "+str(grids)+" buy_zone=<="+str(grids[mid_idx]))
             # Don't clear filled positions — they'll be sold on next uptick
 
@@ -1614,6 +1624,7 @@ DASHBOARD = '''<!DOCTYPE html>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Trading Bot Dashboard</title>
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 :root{--bg:#080808;--card:#111;--border:#1a1a1a;--text:#eee;--text2:#888;--dim:#444;--accent:#00ff9d;--red:#ff6b6b;--blue:#4dabf7;--purple:#cc99ff;--yellow:#ffd43b}
 .light{--bg:#f0f2f5;--card:#fff;--border:#d0d5dd;--text:#1a1a1a;--text2:#555;--dim:#999;--accent:#00b875;--red:#e03131;--blue:#1971c2;--purple:#7c3aed;--yellow:#e67700}
@@ -1627,6 +1638,8 @@ h1{font-size:22px;font-weight:900;color:var(--text)}
 .dot.on{background:var(--accent);box-shadow:0 0 8px var(--accent)}
 .theme-btn{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px 12px;cursor:pointer;font-size:13px;color:var(--text);transition:all .15s}
 .theme-btn:hover{border-color:var(--accent)}
+#chart-container{height:350px;margin-bottom:20px;border-radius:10px;background:var(--card);border:1px solid var(--border);overflow:hidden;position:relative}
+#chart-container iframe{border-radius:10px}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px}
 .sl{font-size:10px;font-weight:700;letter-spacing:2px;color:var(--dim);text-transform:uppercase;margin-bottom:6px}
@@ -1708,6 +1721,8 @@ td{padding:8px 0;border-bottom:1px solid var(--border);color:var(--text2)}
     <div class="stat"><div class="sl">Open Positions</div><div class="sv" id="s-pos">0</div></div>
     <div class="stat"><div class="sl">Mode</div><div class="sv" id="s-mode" style="font-size:14px">—</div></div>
   </div>
+
+  <div id="chart-container"></div>
 
   <div class="summary-cards" id="summary-cards">
     <div class="summary-card"><div class="label">Win Rate</div><div class="value" id="sm-winrate">0%</div></div>
@@ -1847,7 +1862,122 @@ function toggleTheme() {
   isDark = !isDark;
   document.body.classList.toggle("light", !isDark);
   document.getElementById("theme-btn").textContent = isDark ? "🌙 Dark" : "☀ Light";
+  if (chart) setTimeout(function() { updateChartTheme(isDark); }, 100);
 }
+
+
+var chart = null;
+var lineSeries = null;
+var gridLines = [];
+
+function initChart() {
+  try {
+    chart = LightweightCharts.createChart(document.getElementById("chart-container"), {
+      width: document.getElementById("chart-container").clientWidth || 600,
+      height: 350,
+      layout: {
+        background: {type: "solid", color: "transparent"},
+        textColor: "#888",
+      },
+      grid: {
+        vertLines: {color: "#1a1a1a"},
+        horzLines: {color: "#1a1a1a"},
+      },
+      crosshair: {
+        vertLine: {color: "#444", labelBackgroundColor: "#111"},
+        horzLine: {color: "#444", labelBackgroundColor: "#111"},
+      },
+      timeScale: {
+        borderColor: "#1a1a1a",
+        timeVisible: true,
+        secondsVisible: false,
+      },
+      rightPriceScale: {
+        borderColor: "#1a1a1a",
+      },
+    });
+    lineSeries = chart.addLineSeries({
+      color: "#00ff9d",
+      lineWidth: 2,
+      priceFormat: {type: "price", precision: 4, minMove: 0.0001},
+    });
+  } catch(e) { console.log("Chart init error:", e); }
+}
+
+function updateChartTheme(isDarkMode) {
+  if (!chart) return;
+  chart.applyOptions({
+    layout: {
+      textColor: isDarkMode ? "#888" : "#666",
+    },
+    grid: {
+      vertLines: {color: isDarkMode ? "#1a1a1a" : "#e0e0e0"},
+      horzLines: {color: isDarkMode ? "#1a1a1a" : "#e0e0e0"},
+    },
+    timeScale: {
+      borderColor: isDarkMode ? "#1a1a1a" : "#d0d5dd",
+    },
+    rightPriceScale: {
+      borderColor: isDarkMode ? "#1a1a1a" : "#d0d5dd",
+    },
+  });
+}
+
+function updateChart(data, gridLevels, gridBuyZone, pair) {
+  if (!chart || !lineSeries) return;
+  // Update price line
+  if (data && data.length > 1) {
+    lineSeries.setData(data);
+  }
+
+  // Remove old grid lines
+  gridLines.forEach(function(l) { chart.removeSeries(l); });
+  gridLines = [];
+
+  if (!gridLevels || gridLevels.length < 2) return;
+
+  var midPrice = gridBuyZone;
+  var buyZone = gridLevels.filter(function(g) { return g <= midPrice; });
+  var sellZone = gridLevels.filter(function(g) { return g > midPrice; });
+
+  // Buy zone lines (green)
+  buyZone.forEach(function(g) {
+    var s = chart.addLineSeries({
+      color: "#00ff9d44",
+      lineWidth: 1,
+      lineStyle: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    s.setData([{time: data[0].time, value: g}, {time: data[data.length-1].time, value: g}]);
+    gridLines.push(s);
+  });
+
+  // Sell zone lines (red)
+  sellZone.forEach(function(g) {
+    var s = chart.addLineSeries({
+      color: "#ff6b6b44",
+      lineWidth: 1,
+      lineStyle: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    s.setData([{time: data[0].time, value: g}, {time: data[data.length-1].time, value: g}]);
+    gridLines.push(s);
+  });
+
+  // Midpoint line (yellow, thicker)
+  var midLine = chart.addLineSeries({
+    color: "#ffd43b88",
+    lineWidth: 2,
+    lineStyle: 2,
+    priceLineVisible: false,
+    lastValueVisible: false,
+  });
+  midLine.setData([{time: data[0].time, value: midPrice}, {time: data[data.length-1].time, value: midPrice}]);
+  gridLines.push(midLine);
+}
+
 
 function showToast(msg, type) {
   var c = document.getElementById("toast-container");
@@ -2051,6 +2181,9 @@ function refresh() {
     document.getElementById("dot").className = "dot" + (on ? " on" : "");
     document.getElementById("status-text").textContent = on ? "Running — " + (d.strategy || "").toUpperCase() + " on " + d.pair + " (" + (d.mode || "").toUpperCase() + ")" : "Stopped";
     document.getElementById("s-price").textContent = d.price > 0 ? "$" + d.price.toFixed(4) : "—";
+    if (d.price_history && d.price_history.length > 1) {
+      updateChart(d.price_history, d.grid_levels, d.grid_buy_zone, d.pair);
+    }
     document.getElementById("s-balance").textContent = d.balance > 0 ? "$" + d.balance.toFixed(2) : "—";
     document.getElementById("s-sol-balance").textContent = d.sol_balance > 0 ? "$" + d.sol_balance.toFixed(2) + " (USDC: $" + d.sol_usdc.toFixed(2) + " USDT: $" + d.sol_usdt.toFixed(2) + ")" : "—";
     document.getElementById("s-mode").textContent = d.paper_trading ? "📋 PAPER" : "🔴 LIVE";
@@ -2127,8 +2260,16 @@ function refresh() {
   }).catch(console.error);
 }
 
+window.addEventListener("resize", function() {
+  if (chart) {
+    var w = document.getElementById("chart-container").clientWidth || 600;
+    chart.applyOptions({width: w});
+  }
+});
+
 setInterval(refresh, 3000);
 refresh();
+initChart();
 </script>
 </body>
 </html>'''
