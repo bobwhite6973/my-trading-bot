@@ -1945,8 +1945,10 @@ function updateChart(data, gridLevels, gridBuyZone, pair) {
   if (data && data.length > 1) {
     var candles = aggregateCandles(data, 900);
     candleSeries.setData(candles);
-    var _now = Math.floor(Date.now()/1000);
-    chart.timeScale().setVisibleRange({from: _now - 7200, to: _now});
+    var dataStart = candles[0].time;
+    var dataEnd = candles[candles.length - 1].time;
+    var span = Math.max(dataEnd - dataStart, 900);
+    chart.timeScale().setVisibleRange({from: dataEnd - span * 1.5, to: dataEnd + 60});
   }
 
   // Remove old grid lines
