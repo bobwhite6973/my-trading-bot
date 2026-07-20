@@ -516,7 +516,7 @@ def start_background_loops():
                 p = get_price(pair)
                 if p > 0:
                     state["price"] = p
-                    state["price_history"].append({"time": int(time.time()*1000), "value": p})
+                    state["price_history"].append({"time": int(time.time()), "value": p})
                     if len(state["price_history"]) > 200:
                         state["price_history"] = state["price_history"][-200:]
             except Exception as e:
