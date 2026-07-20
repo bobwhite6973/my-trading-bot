@@ -1907,6 +1907,7 @@ function initChart() {
         borderColor: "#1a1a1a",
         timeVisible: true,
         secondsVisible: false,
+        barSpacing: 5,
       },
       rightPriceScale: {
         borderColor: "#1a1a1a",
@@ -1954,7 +1955,6 @@ function updateChart(data, gridLevels, gridBuyZone, pair) {
 
   // Update candles
   var candles = aggregateCandles(data, 60);
-  chart.timeScale().applyOptions({barSpacing: 3, rightOffset: 0});
   candleSeries.setData(candles);
   var dataStart = candles[0].time;
   var dataEnd = candles[candles.length - 1].time;
