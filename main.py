@@ -1941,62 +1941,66 @@ function updateChartTheme(isDarkMode) {
 
 function updateChart(data, gridLevels, gridBuyZone, pair) {
   if (!chart || !candleSeries) return;
-  // Update price line
-  if (data && data.length > 1) {
-    var candles = aggregateCandles(data, 900);
-    candleSeries.setData(candles);
-    var dataStart = candles[0].time;
-    var dataEnd = candles[candles.length - 1].time;
-    var span = Math.max(dataEnd - dataStart, 900);
-    chart.timeScale().setVisibleRange({from: dataEnd - span * 1.5, to: dataEnd + 60});
-  }
-
-  // Remove old grid lines
-  gridLines.forEach(function(l) { chart.removeSeries(l); });
+  // Remove old grid lines (do this first, regardless of data)
+  try {
+    gridLines.forEach(function(l) { chart.removeSeries(l); });
+  } catch(e) { console.log("Grid remove error:", e); }
   gridLines = [];
+  if (!data || data.length < 2) return;
 
+  // Update candles
+  var candles = aggregateCandles(data, 900);
+  candleSeries.setData(candles);
+  var dataStart = candles[0].time;
+  var dataEnd = candles[candles.length - 1].time;
+  var span = Math.max(dataEnd - dataStart, 900);
+  chart.timeScale().setVisibleRange({from: dataEnd - span * 1.5, to: dataEnd + 60});
+
+  // Grid overlay
   if (!gridLevels || gridLevels.length < 2) return;
 
   var midPrice = gridBuyZone;
   var buyZone = gridLevels.filter(function(g) { return g <= midPrice; });
   var sellZone = gridLevels.filter(function(g) { return g > midPrice; });
 
-  // Buy zone lines (green)
-  buyZone.forEach(function(g) {
-    var s = chart.addSeries(LightweightCharts.LineSeries, {
-      color: "#00ff9d44",
-      lineWidth: 1,
+  try {
+    // Buy zone lines (green)
+    buyZone.forEach(function(g) {
+      var s = chart.addSeries(LightweightCharts.LineSeries, {
+        color: "#00ff9d44",
+        lineWidth: 1,
+        lineStyle: 2,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      s.setData([{time: dataStart, value: g}, {time: dataEnd, value: g}]);
+      gridLines.push(s);
+    });
+
+    // Sell zone lines (red)
+    sellZone.forEach(function(g) {
+      var s = chart.addSeries(LightweightCharts.LineSeries, {
+        color: "#ff6b6b44",
+        lineWidth: 1,
+        lineStyle: 2,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      s.setData([{time: dataStart, value: g}, {time: dataEnd, value: g}]);
+      gridLines.push(s);
+    });
+
+    // Midpoint line (yellow, thicker)
+    var midLine = chart.addSeries(LightweightCharts.LineSeries, {
+      color: "#ffd43b88",
+      lineWidth: 2,
       lineStyle: 2,
       priceLineVisible: false,
       lastValueVisible: false,
     });
-    s.setData([{time: data[0].time, value: g}, {time: data[data.length-1].time, value: g}]);
-    gridLines.push(s);
-  });
-
-  // Sell zone lines (red)
-  sellZone.forEach(function(g) {
-    var s = chart.addSeries(LightweightCharts.LineSeries, {
-      color: "#ff6b6b44",
-      lineWidth: 1,
-      lineStyle: 2,
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
-    s.setData([{time: data[0].time, value: g}, {time: data[data.length-1].time, value: g}]);
-    gridLines.push(s);
-  });
-
-  // Midpoint line (yellow, thicker)
-  var midLine = chart.addSeries(LightweightCharts.LineSeries, {
-    color: "#ffd43b88",
-    lineWidth: 2,
-    lineStyle: 2,
-    priceLineVisible: false,
-    lastValueVisible: false,
-  });
-  midLine.setData([{time: data[0].time, value: midPrice}, {time: data[data.length-1].time, value: midPrice}]);
-  gridLines.push(midLine);
+    midLine.setData([{time: dataStart, value: midPrice}, {time: dataEnd, value: midPrice}]);
+    gridLines.push(midLine);
+  } catch(e) { console.log("Grid overlay error:", e); }
 }
 
 
