@@ -513,8 +513,8 @@ def start_background_loops():
                 p = get_price(pair)
                 if p > 0:
                     state["price"] = p
-            except:
-                pass
+            except Exception as e:
+                log("price loop error: "+str(e), "WARN")
             time.sleep(5)
 
     def balance_loop():
@@ -542,8 +542,8 @@ def start_background_loops():
         while True:
             try:
                 scan_arbitrage()
-            except:
-                pass
+            except Exception as e:
+                log("arb loop error: "+str(e), "WARN")
             time.sleep(120)
 
     threading.Thread(target=price_loop, daemon=True).start()
@@ -1345,7 +1345,9 @@ def place_order(pair, side, amount):
         return cex_place_order(pair, side, amount)
 
 def record_trade(side, price, amount, pnl=None):
-    state["trades"].append({"time":time.strftime("%H:%M:%S"),"side":side,"price":price,"amount":amount,"pnl":pnl})
+    trade = {"time":time.strftime("%H:%M:%S"),"side":side,"price":price,"amount":amount,"pnl":pnl}
+    state["trades"].append(trade)
+    state["last_trade"] = {"action": side, "pair": state["pair"], "price": price}
 
 def run_dca():
     log("DCA started on "+state["pair"]+" ("+state["mode"].upper()+")")
@@ -2071,6 +2073,7 @@ function refresh() {
     // Update trade table
     if (d.trades_list && d.trades_list.length) {
       var html = "";
+      tradeLog = [];
       d.trades_list.forEach(function(t) {
         var actionClass = t.action === "buy" ? "buy" : t.action === "sell" ? "sell" : "stop";
         var pnlBadge = t.pnl != null ? pnlHtml(t.pnl) : "—";
@@ -2093,7 +2096,7 @@ function refresh() {
 
     // Update log
     if (d.log && d.log.length) {
-      var logHtml = d.log.slice(-30).map(function(l) {
+      var logHtml = d.log.slice(0, 30).map(function(l) {
         var cls = "li";
         if (l.includes("BUY") || l.includes("buy")) cls = "lw";
         if (l.includes("SELL") || l.includes("sell")) cls = "buy";
