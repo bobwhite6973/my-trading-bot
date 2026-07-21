@@ -1506,6 +1506,8 @@ def run_grid():
                         trailing_buy_active = False
                         trailing_low = 0.0
                         dip_occurred = False
+                        state["grid_trailing_active"] = trailing_sell_active
+                        state["grid_trailing_high"] = trailing_high
 
                 # ── SELL ZONE: trailing take profit ──
                 if not is_buy_zone:
@@ -2288,7 +2290,68 @@ function refresh() {
       });
       // Could add a positions card here
     }
-
+    // ── Grid Details ──
+    var gdCard = document.getElementById("grid-details-card");
+    if (d.strategy === "grid" && d.grid_levels && d.grid_levels.length >= 2) {
+      gdCard.style.display = "block";
+      var gl = d.grid_levels;
+      var midIdx = d.grid_mid_idx != null ? d.grid_mid_idx : Math.floor(gl.length / 2);
+      var midPrice = gl[midIdx];
+      var curPrice = d.price || 0;
+      var filled = d.grid_filled || {};
+      var trailActive = d.grid_trailing_active || false;
+      var trailHigh = d.grid_trailing_high || 0;
+      var trailingPct = 0.5;
+      document.getElementById("gdt-status").textContent = trailActive ? "\uD83D\uDD34 TRAILING SELL ACTIVE" : "\u23F8 Waiting for sell zone";
+      var html = '<div style="margin-top:12px">';
+      var minP = gl[0], maxP = gl[gl.length-1], range = maxP - minP;
+      var curPct = range > 0 ? ((curPrice - minP) / range * 100) : 50;
+      html += '<div style="position:relative;height:6px;background:linear-gradient(90deg,#00ff9d44,#ffd43b44,#ff6b6b44);border-radius:3px;margin-bottom:16px">';
+      html += '<div style="position:absolute;left:' + curPct.toFixed(0) + '%;top:-4px;width:3px;height:14px;background:#3399ff;border-radius:1px"></div>';
+      html += '<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--dim);margin-top:8px">';
+      html += '<span style="color:#00ff9d">$' + minP.toFixed(0) + '</span>';
+      html += '<span style="color:#ffd43b">Mid $' + midPrice.toFixed(0) + '</span>';
+      html += '<span style="color:#ff6b6b">$' + maxP.toFixed(0) + '</span></div></div>';
+      html += '<div style="display:grid;grid-template-columns:50px 90px 1fr 80px;gap:4px;font-size:11px;color:var(--dim);padding:4px 8px;text-transform:uppercase;letter-spacing:0.5px">';
+      html += '<span>Zone</span><span>Price</span><span>Status</span><span style="text-align:right">Dist</span></div>';
+      for (var i = gl.length - 1; i >= 0; i--) {
+        var isMid = i === midIdx;
+        var isBuy = i < midIdx;
+        var isFilled = filled[i] != null;
+        var isCur = (i < gl.length - 1 && curPrice >= gl[i] && curPrice < gl[i+1]) || (i === gl.length - 1 && curPrice >= gl[i]);
+        var zone = isMid ? "MID" : isBuy ? "BUY" : "SELL";
+        var zoneColor = isMid ? "#ffd43b" : isBuy ? "#00ff9d" : "#ff6b6b";
+        var bgColor = isMid ? "#ffd43b08" : isBuy ? "#00ff9d08" : "#ff6b6b08";
+        var borderColor = isMid ? "#ffd43b44" : isBuy ? "#00ff9d44" : "#ff6b6b44";
+        if (isCur) { zone = "\u25CF"; zoneColor = "#3399ff"; bgColor = "#3399ff10"; borderColor = "#3399ff"; }
+        if (isFilled) { zoneColor = "#00ff9d"; bgColor = "#00ff9d15"; borderColor = "#00ff9d"; }
+        var dist = curPrice > 0 ? (gl[i] - curPrice) : 0;
+        var distStr = dist > 0 ? "+$" + dist.toFixed(0) : dist < 0 ? "-$" + Math.abs(dist).toFixed(0) : "\u2014";
+        var status = isFilled ? "\u2705 $" + filled[i].price.toFixed(0) : isCur ? "\u2190 Current" : isMid ? "Buy Zone \u2191" : "Waiting";
+        if (isFilled && trailActive && i < midIdx) status = "\u2705 Trailing...";
+        if (isFilled && !trailActive && i < midIdx) status = "\u2705 Filled";
+        html += '<div style="display:grid;grid-template-columns:50px 90px 1fr 80px;gap:4px;align-items:center;padding:5px 8px;border-radius:4px;margin-bottom:2px;font-size:12px;background:' + bgColor + ';border-left:2px solid ' + borderColor + '">';
+        html += '<span style="font-weight:600;color:' + zoneColor + ';font-size:10px;text-transform:uppercase">' + zone + '</span>';
+        html += '<span style="font-family:monospace;font-weight:600">$' + gl[i].toFixed(2) + '</span>';
+        html += '<span style="color:' + (isFilled ? "#00ff9d" : isCur ? "#3399ff" : "var(--text)") + '">' + status + '</span>';
+        html += '<span style="text-align:right;font-family:monospace;font-size:11px;color:' + (dist > 0 ? "#ff6b6b" : dist < 0 ? "#00ff9d" : "var(--dim)") + '">' + distStr + '</span></div>';
+      }
+      html += '</div>';
+      if (trailActive && trailHigh > 0) {
+        var sellTrigger = trailHigh * (1 - trailingPct / 100);
+        var distToSell = curPrice - sellTrigger;
+        html += '<div style="margin-top:12px;padding:10px 12px;background:#ffd43b08;border:1px solid #ffd43b33;border-radius:6px">';
+        html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
+        html += '<span>\uD83C\uDFAF</span><span style="font-weight:600;color:#ffd43b">Take-profit triggered \u2014 waiting for pullback</span></div>';
+        html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:12px">';
+        html += '<div><span style="color:var(--dim);font-size:10px">Peak</span><div style="font-weight:600;font-family:monospace;color:#ffd43b">$' + trailHigh.toFixed(2) + '</div></div>';
+        html += '<div><span style="color:var(--dim);font-size:10px">Sell Trigger</span><div style="font-weight:600;font-family:monospace;color:#ff6b6b">$' + sellTrigger.toFixed(2) + '</div></div>';
+        html += '<div><span style="color:var(--dim);font-size:10px">Distance</span><div style="font-weight:600;font-family:monospace;color:' + (distToSell > 0 ? "#ffd43b" : "#00ff9d") + '">$' + Math.abs(distToSell).toFixed(2) + '</div></div></div></div>';
+      }
+      document.getElementById("grid-details-body").innerHTML = html;
+    } else {
+      gdCard.style.display = "none";
+    }
     // Update log
     if (d.log && d.log.length) {
       var logHtml = d.log.slice(0, 30).map(function(l) {
