@@ -38,6 +38,8 @@ cfg = {
     # Safety — default to paper trading to avoid accidental live trades
     "min_arb_spread":  float(os.environ.get("MIN_ARB_SPREAD", "1.5")),
     "paper_trading":   os.environ.get("PAPER_TRADING", "true").lower() != "false",
+    "auto_compound":   os.environ.get("AUTO_COMPOUND", "true").lower() != "false",
+    "partial_sell_pct":  float(os.environ.get("PARTIAL_SELL_PCT", "50")),
 }
 
 # ── Bot State ─────────────────────────────────────────────────────────────────
@@ -83,6 +85,8 @@ state = {
     "grid_trailing_high": 0.0,
     "grid_mid_idx": 0,
     "positions_count": 0,
+    "compound_profit":  0.0,
+    "partial_positions": {},
 }
 
 def log(msg, level="INFO"):
@@ -1474,7 +1478,9 @@ def run_grid():
             # Don't clear filled positions — they'll be sold on next uptick
 
         bal = get_balance()
-        size = min(bal*cfg["risk_pct"]/100, cfg["max_pos"])/levels
+        # Auto-compound: add compounded profits to available capital
+        effective_bal = bal + (state.get("compound_profit", 0) if cfg.get("auto_compound", True) else 0)
+        size = min(effective_bal*cfg["risk_pct"]/100, cfg["max_pos"])/levels
         for i,g in enumerate(grids[:-1]):
             ng = grids[i+1]
             if g <= price < ng:
@@ -1529,26 +1535,62 @@ def run_grid():
                             trailing_high = price
                             state["grid_trailing_high"] = trailing_high
                             log("Trailing high updated to $"+str(price))
-                    # Sell when price drops 1% below peak
+                    # Sell when price drops trailing_pct% below peak
                     if trailing_sell_active and price <= trailing_high * (1 - trailing_pct / 100):
                         for buy_idx in sorted(filled.keys()):
                             if buy_idx < i:
                                 amt = filled[buy_idx]["amount"]
                                 buy_price = filled[buy_idx]["price"]
-                                if place_order(state["pair"],"sell",amt):
-                                    pnl=(price-buy_price)*amt
+                                partial_pct = cfg.get("partial_sell_pct", 50)
+                                # Check if this position still has a partial remainder
+                                partial_key = str(buy_idx)
+                                is_partial_sell = cfg.get("partial_sell_pct", 50) < 100
+                                sell_amt = amt
+                                # ── Partial sell logic ──
+                                if is_partial_sell and partial_key not in state.get("partial_positions", {}):
+                                    # First sell: only sell partial_pct%
+                                    sell_amt = amt * partial_pct / 100
+                                    keep_amt = amt - sell_amt
+                                    state["partial_positions"][partial_key] = {
+                                        "amount": keep_amt, "buy_price": buy_price,
+                                        "orig_amount": amt, "price": price
+                                    }
+                                    # Update filled entry to reflect kept amount
+                                    filled[buy_idx]["amount"] = keep_amt
+                                    log("PARTIAL SELL: sold "+str(round(sell_amt,6))+" ("
+                                        +str(int(partial_pct))+"%) @ $"+str(round(price,2))
+                                        +", keeping "+str(round(keep_amt,6))+" for wider trailing")
+                                elif partial_key in state.get("partial_positions", {}):
+                                    # Second sell: sell the remainder
+                                    sell_amt = amt  # sell everything left
+                                    if partial_key in state["partial_positions"]:
+                                        del state["partial_positions"][partial_key]
+                                if place_order(state["pair"],"sell",sell_amt):
+                                    pnl=(price-buy_price)*sell_amt
                                     state["pnl"]+=pnl
-                                    record_trade("GRID-SELL",price,amt,round(pnl,2))
+                                    if cfg.get("auto_compound", True) and pnl > 0:
+                                        state["compound_profit"] += pnl
+                                    tag = "GRID-PARTIAL" if is_partial_sell else "GRID-SELL"
+                                    record_trade(tag,price,sell_amt,round(pnl,2))
                                     log("SELL level "+str(buy_idx)+" @ $"+str(round(price,2))+" (peak $"+str(round(trailing_high,2))+" missed $"+str(round(trailing_high-price,2))+" PnL $"+str(round(pnl,2))+")")
                                     log("TRADE SUMMARY: bought $"+str(round(buy_price,2))+" sold $"+str(round(price,2))+" peak $"+str(round(trailing_high,2))+" missed $"+str(round(trailing_high-price,2))+" PnL $"+str(round(pnl,2)))
-                                    del filled[buy_idx]
-                                    state["positions"]=[p for p in state["positions"] if p.get("grid")!=buy_idx]
-                                    trailing_sell_active = False
-                                    trailing_high = 0.0
-                                    state["grid_trailing_active"] = False
-                                    state["grid_trailing_high"] = 0.0
-                                    state["grid_filled"] = {k: v for k, v in filled.items()}
-                                    break
+                                    if is_partial_sell and partial_key in state.get("partial_positions",{}):
+                                        # Don't delete the position yet — still holding remainder
+                                        trailing_sell_active = False
+                                        trailing_high = 0.0
+                                        state["grid_trailing_active"] = False
+                                        state["grid_trailing_high"] = 0.0
+                                        state["grid_filled"] = {k: v for k, v in filled.items()}
+                                        break
+                                    else:
+                                        del filled[buy_idx]
+                                        state["positions"]=[p for p in state["positions"] if p.get("grid")!=buy_idx]
+                                        trailing_sell_active = False
+                                        trailing_high = 0.0
+                                        state["grid_trailing_active"] = False
+                                        state["grid_trailing_high"] = 0.0
+                                        state["grid_filled"] = {k: v for k, v in filled.items()}
+                                        break
                 else:
                     # Price back in buy zone — reset sell trailing
                     if trailing_sell_active:
@@ -2498,9 +2540,15 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/config":
             if not self._auth_or_401(): return
-            for key in ["max_leverage", "max_position", "cooldown", "slippage"]:
-                if key in data: cfg[key] = data[key]
-            state["config"] = {k: cfg.get(k) for k in ["max_leverage", "max_position", "cooldown", "slippage"] if cfg.get(k)}
+            for key in ["max_leverage", "max_position", "cooldown", "slippage", "auto_compound", "partial_sell_pct"]:
+                if key in data:
+                    if key in ("auto_compound",):
+                        cfg[key] = str(data[key]).lower() in ("true","1","yes")
+                    elif key in ("partial_sell_pct",):
+                        cfg[key] = float(data[key])
+                    else:
+                        cfg[key] = data[key]
+            state["config"] = {k: cfg.get(k) for k in ["max_leverage", "max_position", "cooldown", "slippage", "auto_compound", "partial_sell_pct"] if cfg.get(k) is not None}
             log("Config updated: "+json.dumps(data))
             self.respond(200,"application/json",json.dumps({"status":"ok","config":state["config"]}).encode())
         else:
