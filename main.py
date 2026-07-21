@@ -2179,7 +2179,7 @@ function saveConfig() {
     cooldown: parseInt(document.getElementById("cfg-cooldown").value) || 30,
     slippage: parseFloat(document.getElementById("cfg-slippage").value) || 0.5
   };
-  fetch("/config", {
+  apiFetch("/config", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify(cfg)
@@ -2244,7 +2244,7 @@ function startBot() {
   var params = "strategy=" + sel.strat + "&pair=" + encodeURIComponent(sel.pair) + "&mode=" + sel.mode;
   if (sel.mode == "cex" && sel.exch) params += "&exchange=" + sel.exch;
   if (sel.mode == "dex" && sel.chain) params += "&chain=" + sel.chain;
-  fetch("/start?" + params).then(function(r) { return r.json(); }).then(function(d) {
+  apiFetch("/start?" + params).then(function(r) { return r.json(); }).then(function(d) {
     showToast("Bot started: " + sel.strat.toUpperCase(), "info");
     document.getElementById("pause-btn").style.display = "inline-block";
     document.getElementById("pause-btn").textContent = "⏸ Pause";
@@ -2252,14 +2252,14 @@ function startBot() {
 }
 
 function stopBot() {
-  fetch("/stop").then(function(r) { return r.json(); }).then(function(d) {
+  apiFetch("/stop").then(function(r) { return r.json(); }).then(function(d) {
     showToast("Bot stopped", "info");
     document.getElementById("pause-btn").style.display = "none";
   });
 }
 
 function pauseBot() {
-  fetch("/pause").then(function(r) { return r.json(); }).then(function(d) {
+  apiFetch("/pause").then(function(r) { return r.json(); }).then(function(d) {
     var paused = d.paused || d.status === "paused";
     document.getElementById("pause-btn").textContent = paused ? "▶ Resume" : "⏸ Pause";
     showToast(paused ? "Bot paused" : "Bot resumed", "info");
@@ -2278,7 +2278,7 @@ function pnlHtml(v) {
 }
 
 function togglePaper() {
-  fetch("/toggle_paper").then(function(r) { return r.json(); }).then(function(d) {
+  apiFetch("/toggle_paper").then(function(r) { return r.json(); }).then(function(d) {
     var btn = document.getElementById("paper-btn");
     var on = d.paper_trading;
     btn.textContent = "📋 Paper: " + (on ? "ON" : "OFF");
@@ -2447,6 +2447,13 @@ window.addEventListener("resize", function() {
 setInterval(refresh, 3000);
 refresh();
 initChart();
+  var API_SECRET = "";
+  function apiFetch(url, opts) {
+    opts = opts || {};
+    opts.headers = opts.headers || {};
+    if (API_SECRET) opts.headers["X-API-Secret"] = API_SECRET;
+    return fetch(url, opts);
+  }
 </script>
 </body>
 </html>'''
