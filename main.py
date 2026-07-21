@@ -523,8 +523,8 @@ def start_background_loops():
                 if p > 0:
                     state["price"] = p
                     state["price_history"].append({"time": int(time.time()), "value": p})
-                    if len(state["price_history"]) > 200:
-                        state["price_history"] = state["price_history"][-200:]
+                    if len(state["price_history"]) > 1440:
+                        state["price_history"] = state["price_history"][-1440:]
             except Exception as e:
                 log("price loop error: "+str(e), "WARN")
             time.sleep(5)
@@ -1667,7 +1667,7 @@ h1{font-size:22px;font-weight:900;color:var(--text)}
 .dot.on{background:var(--accent);box-shadow:0 0 8px var(--accent)}
 .theme-btn{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px 12px;cursor:pointer;font-size:13px;color:var(--text);transition:all .15s}
 .theme-btn:hover{border-color:var(--accent)}
-#chart-container{height:350px;width:50%;min-width:0;border-radius:10px;background:var(--card);border:1px solid var(--border);overflow:hidden;position:relative}
+#chart-container{height:350px;flex:1;min-width:0;border-radius:10px;background:var(--card);border:1px solid var(--border);overflow:hidden;position:relative}
 #chart-container iframe{border-radius:10px}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px}
@@ -1752,8 +1752,8 @@ td{padding:8px 0;border-bottom:1px solid var(--border);color:var(--text2)}
   </div>
 
   <div style="display:flex;gap:16px;align-items:stretch">
-    <div id="chart-container" style="width:50%;min-width:0"></div>
-    <div class="card" id="grid-details-card" style="width:340px;flex-shrink:0;height:350px;overflow-y:auto">
+    <div id="chart-container" style="flex:1;min-width:0"></div>
+    <div class="card" id="grid-details-card" style="width:420px;flex-shrink:0;height:400px;overflow-y:auto">
       <div class="ct" style="display:flex;align-items:center;gap:8px">
         Grid Details
         <span id="gdt-status" style="font-size:11px;font-weight:400;color:var(--dim)"></span>
@@ -1999,9 +1999,8 @@ function updateChart(data, gridLevels, gridBuyZone, pair) {
   var dataStart = candles[0].time;
   var dataEnd = candles[candles.length - 1].time;
 
-  // Force barSpacing after setData (setData resets the time scale)
-  chart.applyOptions({ timeScale: { barSpacing: 5 } });
-  chart.timeScale().scrollToPosition(candles.length, false);
+  // Fit candles to fill the window — thin out as data grows, scrolls when full
+  chart.timeScale().fitContent();
 
   // Grid overlay
   if (!gridLevels || gridLevels.length < 2) return;
