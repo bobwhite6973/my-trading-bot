@@ -39,7 +39,7 @@ cfg = {
     "min_arb_spread":  float(os.environ.get("MIN_ARB_SPREAD", "1.5")),
     "paper_trading":   os.environ.get("PAPER_TRADING", "true").lower() != "false",
     "auto_compound":   os.environ.get("AUTO_COMPOUND", "true").lower() != "false",
-    "partial_sell_pct":  float(os.environ.get("PARTIAL_SELL_PCT", "50")),
+    "partial_sell_pct":  max(1, min(99, float(os.environ.get("PARTIAL_SELL_PCT", "50")))),
 }
 
 # ── Bot State ─────────────────────────────────────────────────────────────────
@@ -1474,6 +1474,7 @@ def run_grid():
             state["grid_filled"] = filled
             state["grid_trailing_active"] = trailing_sell_active
             state["grid_trailing_high"] = trailing_high
+            state["partial_positions"] = {}
             log("Grid re-centered: "+str(grids)+" buy_zone=<="+str(grids[mid_idx]))
             # Don't clear filled positions — they'll be sold on next uptick
 
@@ -2545,7 +2546,10 @@ class Handler(BaseHTTPRequestHandler):
                     if key in ("auto_compound",):
                         cfg[key] = str(data[key]).lower() in ("true","1","yes")
                     elif key in ("partial_sell_pct",):
-                        cfg[key] = float(data[key])
+                        try:
+                            cfg[key] = float(data[key])
+                        except (ValueError, TypeError) as e:
+                            log("Config "+key+" parse error: "+str(e), "WARN")
                     else:
                         cfg[key] = data[key]
             state["config"] = {k: cfg.get(k) for k in ["max_leverage", "max_position", "cooldown", "slippage", "auto_compound", "partial_sell_pct"] if cfg.get(k) is not None}
