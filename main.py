@@ -1947,7 +1947,7 @@ function initChart() {
         borderColor: "#1a1a1a",
         timeVisible: true,
         secondsVisible: false,
-        barSpacing: 5,
+        barSpacing: 3,
       },
       rightPriceScale: {
         borderColor: "#1a1a1a",
@@ -1999,9 +1999,8 @@ function updateChart(data, gridLevels, gridBuyZone, pair) {
   var dataStart = candles[0].time;
   var dataEnd = candles[candles.length - 1].time;
 
-  // Fixed 3px candles — scroll left as time passes, scroll back up to 24h
-  chart.applyOptions({ timeScale: { barSpacing: 3 } });
-  chart.timeScale().scrollToPosition(candles.length, false);
+  // Auto-fill window: wide candles at first, shrink to 3px min, scroll when full
+  chart.timeScale().fitContent();
 
   // Grid overlay
   if (!gridLevels || gridLevels.length < 2) return;
