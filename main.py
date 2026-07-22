@@ -1409,12 +1409,12 @@ def place_order(pair, side, amount):
         return cex_place_order(pair, side, amount)
 
 def record_trade(side, price, amount, pnl=None):
-    trade = {"time":time.strftime("%H:%M:%S"),"side":side,"price":price,"amount":amount,"pnl":pnl}
+    trade = {"time":time.strftime("%H:%M:%S"),"side":side,"price":price,"amount":amount,"pnl":pnl,"pair":state.get("pair","")}
     state["trades"].append(trade)
     if len(state["trades"]) > 500:
         state["trades"] = state["trades"][-500:]
     state["last_trade"] = {"action": side, "pair": state["pair"], "price": price, "time": time.time()}
-    state["trades_list"] = [{"time":t["time"],"action":t["side"],"price":t["price"],"amount":t["amount"],"pnl":t.get("pnl"),"via":t.get("router","")} for t in state["trades"][-50:]]
+    state["trades_list"] = [{"time":t["time"],"action":t["side"],"price":t["price"],"amount":t["amount"],"pnl":t.get("pnl"),"via":t.get("router",""),"pair":t.get("pair", state.get("pair",""))} for t in state["trades"][-50:]]
 
 def run_dca():
     log("DCA started on "+state["pair"]+" ("+state["mode"].upper()+")")
@@ -2103,8 +2103,8 @@ td{padding:8px 0;border-bottom:1px solid var(--border);color:var(--text2)}
     </div>
     <div style="overflow-x:auto">
       <table>
-        <thead><tr><th>Time</th><th>Action</th><th>Price</th><th>Amount</th><th>P&amp;L</th><th>Via</th></tr></thead>
-        <tbody id="trades-body"><tr><td colspan="6" style="color:var(--dim);text-align:center;padding:20px">No trades yet</td></tr></tbody>
+        <thead><tr><th>Pair</th><th>Action</th><th>Price</th><th>Amount</th><th>P&amp;L</th><th>Via</th></tr></thead>
+        <tbody id="trades-body"><tr><td colspan="7" style="color:var(--dim);text-align:center;padding:20px">No trades yet</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -2319,9 +2319,9 @@ function requestNotif() {
 
 function exportCSV() {
   if (tradeLog.length === 0) { showToast("No trades to export", "error"); return; }
-  var headers = "Time,Action,Price,Amount,P&L,Via";
+  var headers = "Time,Pair,Action,Price,Amount,P&L,Via";
   var rows = tradeLog.map(function(t) {
-    return [t.time, t.action, t.price, t.amount, t.pnl, t.via].join(",");
+    return [t.time, t.pair, t.action, t.price, t.amount, t.pnl, t.via].join(",");
   });
   var csv = [headers].concat(rows).join("\\n");
   var blob = new Blob([csv], {type: "text/csv"});
@@ -2612,9 +2612,9 @@ function refresh() {
       d.trades_list.forEach(function(t) {
         var actionClass = t.action === "buy" ? "buy" : t.action === "sell" ? "sell" : "stop";
         var pnlBadge = t.pnl != null ? pnlHtml(t.pnl) : "—";
-        html += "<tr><td>" + t.time + "</td><td class='" + actionClass + "'>" + t.action.toUpperCase() + "</td><td>$" + t.price + "</td><td>$" + t.amount + "</td><td>" + pnlBadge + "</td><td>" + (t.via || "—") + "</td></tr>";
+        html += "<tr><td>" + (t.pair || "—") + "</td><td class='" + actionClass + "'>" + t.action.toUpperCase() + "</td><td>$" + t.price + "</td><td>" + t.amount + "</td><td>" + pnlBadge + "</td><td>" + (t.via || "—") + "</td></tr>";
         // Log to trade log for CSV export
-        tradeLog.push({time: t.time, action: t.action, price: t.price, amount: t.amount, pnl: t.pnl, via: t.via || "", strategy: d.strategy, pair: d.pair});
+        tradeLog.push({time: t.time, action: t.action, price: t.price, amount: t.amount, pnl: t.pnl, via: t.via || "", strategy: d.strategy, pair: t.pair || d.pair});
       });
       document.getElementById("trades-body").innerHTML = html;
     }
@@ -2771,7 +2771,7 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/":
             self.respond(200,"text/html",DASHBOARD.replace("{API_SECRET}", os.environ.get("API_SECRET","")).encode())
         elif path=="/state":
-            state["trades_list"] = [{"time":t["time"],"action":t["side"],"price":t["price"],"amount":t["amount"],"pnl":t.get("pnl"),"via":t.get("router","")} for t in state["trades"][-50:]]
+            state["trades_list"] = [{"time":t["time"],"action":t["side"],"price":t["price"],"amount":t["amount"],"pnl":t.get("pnl"),"via":t.get("router",""),"pair":t.get("pair", state.get("pair",""))} for t in state["trades"][-50:]]
             state["positions_count"] = len(state.get("positions", []))
             if not self._check_auth():
                 self.respond(200,"application/json",json.dumps({"price":state.get("price",0),"running":state.get("running",False),"strategy":state.get("strategy",""),"pair":state.get("pair",""),"mode":state.get("mode",""),"paper_trading":state.get("paper_trading",True)}).encode())
