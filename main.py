@@ -1025,7 +1025,7 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
             "jsonrpc":"2.0","id":1,"method":"sendTransaction",
             "params":[
                 b64.b64encode(bytes(signed_tx)).decode(),
-                {"encoding":"base64","skipPreflight":True,
+                {"encoding":"base64","skipPreflight":False,
                  "preflightCommitment":"confirmed","maxRetries":5}
             ]
         }, timeout=20)
@@ -1033,12 +1033,21 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
 
         tx_sig = result.get("result","")
         if tx_sig:
-            time.sleep(2)
-            verify_payload = {"jsonrpc":"2.0","id":1,"method":"getSignatureStatuses","params":[[tx_sig]]}
-            vr = requests.post(rpc, json=verify_payload, timeout=8)
-            vdata = vr.json()
-            vresult = vdata.get("result",{}).get("value",[{}])[0]
-            tx_ok = vresult and vresult.get("confirmationStatus") in ("confirmed","finalized") and vresult.get("err") is None
+            # Retry confirmation up to 15s (Solana can take several seconds)
+            tx_ok = False
+            vresult = None
+            for attempt in range(5):
+                time.sleep(3)
+                try:
+                    verify_payload = {"jsonrpc":"2.0","id":1,"method":"getSignatureStatuses","params":[[tx_sig]]}
+                    vr = requests.post(rpc, json=verify_payload, timeout=8)
+                    vdata = vr.json()
+                    vresult = vdata.get("result",{}).get("value",[{}])[0]
+                    if vresult and vresult.get("confirmationStatus") in ("confirmed","finalized") and vresult.get("err") is None:
+                        tx_ok = True
+                        break
+                except Exception:
+                    pass
             if tx_ok:
                 log("RAYDIUM SWAP CONFIRMED: "+tx_sig[:20]+"... "+from_token+"→"+to_token+via)
                 trade = {"time":time.strftime("%H:%M:%S"),"side":"LIVE-"+side+via,
