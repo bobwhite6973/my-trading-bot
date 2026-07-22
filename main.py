@@ -40,6 +40,8 @@ cfg = {
     "paper_trading":   os.environ.get("PAPER_TRADING", "true").lower() != "false",
     "auto_compound":   os.environ.get("AUTO_COMPOUND", "true").lower() != "false",
     "partial_sell_pct":  max(1, min(99, float(os.environ.get("PARTIAL_SELL_PCT", "50")))),
+    "tg_bot_token":    os.environ.get("TG_BOT_TOKEN", ""),
+    "tg_chat_id":      os.environ.get("TG_CHAT_ID", ""),
 }
 
 # ── Bot State ─────────────────────────────────────────────────────────────────
@@ -88,6 +90,18 @@ state = {
     "compound_profit":  0.0,
     "partial_positions": {},
 }
+
+def send_telegram(msg):
+    token = cfg.get("tg_bot_token", "")
+    chat_id = cfg.get("tg_chat_id", "")
+    if not token or not chat_id:
+        return
+    try:
+        requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
+            timeout=5)
+    except Exception as e:
+        pass  # silent failure — don't block trading
 
 def log(msg, level="INFO"):
     ts = time.strftime("%H:%M:%S")
@@ -1507,6 +1521,7 @@ def run_grid():
                                 state["positions"].append({"price":price,"amount":amt,"grid":i,"strategy":"Grid"})
                                 record_trade("GRID-BUY",price,amt)
                                 log("BUY level "+str(i)+" @ $"+str(round(price,2))+(" (low $"+str(round(trailing_low,2))+" +"+str(trailing_pct)+"% bounce)" if dip_occurred else " (no dip)"))
+                                send_telegram("🟢 <b>BUY</b> "+state["pair"]+"\nLevel: "+str(i)+"\nPrice: $"+str(round(price,2))+"\nAmount: "+str(round(amt,6))+"\nMode: "+("LIVE" if not state["paper_trading"] else "PAPER"))
                                 trailing_buy_active = False
                                 trailing_low = 0.0
                                 # Reset sell trailing too, new position opened
@@ -1575,6 +1590,7 @@ def run_grid():
                                     record_trade(tag,price,sell_amt,round(pnl,2))
                                     log("SELL level "+str(buy_idx)+" @ $"+str(round(price,2))+" (peak $"+str(round(trailing_high,2))+" missed $"+str(round(trailing_high-price,2))+" PnL $"+str(round(pnl,2))+")")
                                     log("TRADE SUMMARY: bought $"+str(round(buy_price,2))+" sold $"+str(round(price,2))+" peak $"+str(round(trailing_high,2))+" missed $"+str(round(trailing_high-price,2))+" PnL $"+str(round(pnl,2)))
+                                    send_telegram("🔴 <b>SELL</b> "+state["pair"]+"\nBought: $"+str(round(buy_price,2))+"\nSold: $"+str(round(price,2))+"\nPnL: $"+str(round(pnl,2))+"\nTag: "+tag+"\nMode: "+("LIVE" if not state["paper_trading"] else "PAPER"))
                                     if is_partial_sell and partial_key in state.get("partial_positions",{}):
                                         # Don't delete the position yet — still holding remainder
                                         trailing_sell_active = False
