@@ -2322,17 +2322,8 @@ function updateChart(data, gridLevels, gridBuyZone, pair) {
   var dataStart = candles[0].time;
   var dataEnd = candles[candles.length - 1].time;
 
-  // Auto-scroll: only follow latest if user is near the right edge
   chart.applyOptions({ timeScale: { barSpacing: 3 } });
-  var vr = chart.timeScale().getVisibleLogicalRange();
-  var totalCandles = candles.length;
-  if (vr && totalCandles > 0) {
-    var visibleSpan = vr.to - vr.from;
-    var threshold = Math.max(3, visibleSpan * 0.1);
-    if (vr.to >= totalCandles - threshold) {
-      chart.timeScale().scrollToPosition(totalCandles, false);
-    }
-  }
+  chart.timeScale().scrollToPosition(candles.length, false);
 
   // Grid overlay
   if (!gridLevels || gridLevels.length < 2) return;
