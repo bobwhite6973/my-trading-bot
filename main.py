@@ -2290,7 +2290,7 @@ function togglePaper() {
 }
 
 function refresh() {
-  fetch("/state").then(function(r) { return r.json(); }).then(function(d) {
+  apiFetch("/state").then(function(r) { return r.json(); }).then(function(d) {
     var on = d.running;
     document.getElementById("dot").className = "dot" + (on ? " on" : "");
     document.getElementById("status-text").textContent = on ? "Running — " + (d.strategy || "").toUpperCase() + " on " + d.pair + " (" + (d.mode || "").toUpperCase() + ")" : "Stopped";
