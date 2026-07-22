@@ -1692,111 +1692,111 @@ def run_grid():
                             log("["+pair+"] Trailing sell reset — price back in buy zone")
                             trailing_sell_active = False
                             trailing_high = 0.0
-                # ── Daily loss limit check ──
-                now = int(time.time())
-                today_midnight = now - (now % 86400)
-                if state.get("last_midnight",0) < today_midnight:
-                    state["daily_pnl"] = 0.0
-                    state["last_midnight"] = today_midnight
-                # Track peak balance
-                b = get_balance()
-                if b > state.get("peak_balance", 0):
-                    state["peak_balance"] = b
-                # Drawdown check
-                dd_pct = cfg.get("max_drawdown_pct", 20)
-                pk = state.get("peak_balance", 0)
-                if pk > 0 and b < pk * (1 - dd_pct/100):
-                    log("DRAWDOWN STOP: balance $"+str(round(b,2))+" < "+str(round(pk*(1-dd_pct/100),2))+" ("+str(int(dd_pct))+"% drawdown)", "WARN")
-                    state["running"] = False
-                    state["strategy"] = None
-                    state["emergency_stop"] = True
-                    return
-                dl = cfg.get("daily_loss_limit", 200)
-                if state["daily_pnl"] < -dl:
-                    log("DAILY LOSS LIMIT: $"+"{:.2f}".format(-state["daily_pnl"])+" exceeds $"+str(dl), "WARN")
-                    state["running"] = False
-                    state["strategy"] = None
-                    state["emergency_stop"] = True
-                    return
-                # Save per-pair state back
-                gs.update({
-                    "grids": grids, "mid_idx": mid_idx, "filled": filled,
-                    "trailing_high": trailing_high, "trailing_sell_active": trailing_sell_active,
-                    "trailing_low": trailing_low, "trailing_buy_active": trailing_buy_active,
-                    "dip_occurred": dip_occurred,
-                })
-                _grid_sync_state(pair, gs, grids, mid_idx, filled, trailing_sell_active, trailing_high)
-            time.sleep(30)
+            # ── Daily loss limit check ──
+            now = int(time.time())
+            today_midnight = now - (now % 86400)
+            if state.get("last_midnight",0) < today_midnight:
+                state["daily_pnl"] = 0.0
+                state["last_midnight"] = today_midnight
+            # Track peak balance
+            b = get_balance()
+            if b > state.get("peak_balance", 0):
+                state["peak_balance"] = b
+            # Drawdown check
+            dd_pct = cfg.get("max_drawdown_pct", 20)
+            pk = state.get("peak_balance", 0)
+            if pk > 0 and b < pk * (1 - dd_pct/100):
+                log("DRAWDOWN STOP: balance $"+str(round(b,2))+" < "+str(round(pk*(1-dd_pct/100),2))+" ("+str(int(dd_pct))+"% drawdown)", "WARN")
+                state["running"] = False
+                state["strategy"] = None
+                state["emergency_stop"] = True
+                return
+            dl = cfg.get("daily_loss_limit", 200)
+            if state["daily_pnl"] < -dl:
+                log("DAILY LOSS LIMIT: $"+"{:.2f}".format(-state["daily_pnl"])+" exceeds $"+str(dl), "WARN")
+                state["running"] = False
+                state["strategy"] = None
+                state["emergency_stop"] = True
+                return
+            # Save per-pair state back
+            gs.update({
+                "grids": grids, "mid_idx": mid_idx, "filled": filled,
+                "trailing_high": trailing_high, "trailing_sell_active": trailing_sell_active,
+                "trailing_low": trailing_low, "trailing_buy_active": trailing_buy_active,
+                "dip_occurred": dip_occurred,
+            })
+            _grid_sync_state(pair, gs, grids, mid_idx, filled, trailing_sell_active, trailing_high)
+        time.sleep(30)
 
-    def run_scalp():
-        log("Scalping started on "+state["pair"]+" ("+state["mode"].upper()+")")
-        prices=[]; position=None
-        while state["running"] and state["strategy"]=="scalp":
-            while state["paused"]: time.sleep(1)
-            price=get_price(state["pair"])
-            if price<=0: time.sleep(10); continue
-            prices.append(price)
-            if len(prices)>20: prices.pop(0)
-            if len(prices)<10: time.sleep(10); continue
-            sma=sum(prices)/len(prices)
-            bal=get_balance()
-            size=min(bal*cfg["risk_pct"]/100,cfg["max_pos"])
-            if position is None and price<sma*0.999 and size>1:
-                amt=round(size/price,6)
-                if place_order(pair,"buy",amt):
-                    position={"price":price,"amount":amt}
-                    state["positions"]=[{"price":price,"amount":amt,"strategy":"Scalp"}]
-                    record_trade("SCALP-BUY",price,amt)
-                    log("Scalp BUY @ $"+str(price))
-            elif position:
-                gain=(price-position["price"])/position["price"]*100
-                loss=(position["price"]-price)/position["price"]*100
-                if gain>=cfg["take_profit"]/3 or loss>=cfg["stop_loss"]/2:
-                    if place_order(pair,"sell",position["amount"]):
-                        pnl=(price-position["price"])*position["amount"]
-                        state["pnl"]+=pnl
-                        if pnl<0: state["daily_loss"]+=abs(pnl)
-                        record_trade("SCALP-SELL",price,position["amount"],round(pnl,2))
-                        log("Scalp SELL @ $"+str(price)+" PnL: $"+str(round(pnl,2)))
-                        position=None; state["positions"]=[]
-            time.sleep(10)
+def run_scalp():
+    log("Scalping started on "+state["pair"]+" ("+state["mode"].upper()+")")
+    prices=[]; position=None
+    while state["running"] and state["strategy"]=="scalp":
+        while state["paused"]: time.sleep(1)
+        price=get_price(state["pair"])
+        if price<=0: time.sleep(10); continue
+        prices.append(price)
+        if len(prices)>20: prices.pop(0)
+        if len(prices)<10: time.sleep(10); continue
+        sma=sum(prices)/len(prices)
+        bal=get_balance()
+        size=min(bal*cfg["risk_pct"]/100,cfg["max_pos"])
+        if position is None and price<sma*0.999 and size>1:
+            amt=round(size/price,6)
+            if place_order(pair,"buy",amt):
+                position={"price":price,"amount":amt}
+                state["positions"]=[{"price":price,"amount":amt,"strategy":"Scalp"}]
+                record_trade("SCALP-BUY",price,amt)
+                log("Scalp BUY @ $"+str(price))
+        elif position:
+            gain=(price-position["price"])/position["price"]*100
+            loss=(position["price"]-price)/position["price"]*100
+            if gain>=cfg["take_profit"]/3 or loss>=cfg["stop_loss"]/2:
+                if place_order(pair,"sell",position["amount"]):
+                    pnl=(price-position["price"])*position["amount"]
+                    state["pnl"]+=pnl
+                    if pnl<0: state["daily_loss"]+=abs(pnl)
+                    record_trade("SCALP-SELL",price,position["amount"],round(pnl,2))
+                    log("Scalp SELL @ $"+str(price)+" PnL: $"+str(round(pnl,2)))
+                    position=None; state["positions"]=[]
+        time.sleep(10)
 
-    def run_copy():
-        source=cfg["source_wallet"]
-        log("Copy Trading watching: "+source)
-        while state["running"] and state["strategy"]=="copy":
-            while state["paused"]: time.sleep(1)
-            log("Monitoring "+source+" for trades...")
-            time.sleep(60)
+def run_copy():
+    source=cfg["source_wallet"]
+    log("Copy Trading watching: "+source)
+    while state["running"] and state["strategy"]=="copy":
+        while state["paused"]: time.sleep(1)
+        log("Monitoring "+source+" for trades...")
+        time.sleep(60)
 
-    def run_arbitrage():
-        mode = "PAPER" if state["paper_trading"] else "LIVE"
-        chain = state.get("chain","ethereum")
-        log("Arbitrage started ["+mode+" MODE] on "+chain+" — min spread: "+str(cfg["min_arb_spread"])+"%")
-        while state["running"] and state["strategy"]=="arb":
-            while state["paused"]: time.sleep(1)
-            # Don't scan if a trade is in progress
-            if state["trading_lock"]:
-                time.sleep(5)
-                continue
+def run_arbitrage():
+    mode = "PAPER" if state["paper_trading"] else "LIVE"
+    chain = state.get("chain","ethereum")
+    log("Arbitrage started ["+mode+" MODE] on "+chain+" — min spread: "+str(cfg["min_arb_spread"])+"%")
+    while state["running"] and state["strategy"]=="arb":
+        while state["paused"]: time.sleep(1)
+        # Don't scan if a trade is in progress
+        if state["trading_lock"]:
+            time.sleep(5)
+            continue
 
-            # Cooldown between trades — wait 15s after last trade
-            time_since_last = time.time() - state["last_trade_time"]
-            if time_since_last < 15:
-                time.sleep(15 - time_since_last)
-                continue
+        # Cooldown between trades — wait 15s after last trade
+        time_since_last = time.time() - state["last_trade_time"]
+        if time_since_last < 15:
+            time.sleep(15 - time_since_last)
+            continue
 
-            opps = scan_arbitrage()
-            # Only execute the BEST opportunity per cycle, not all of them
-            for opp in opps:
-                if not state["running"]: break
-                if opp["executable"]:
-                    log("ARB opportunity: "+opp["pair"]+" spread "+str(opp["spread_pct"])+"% est profit $"+str(opp["est_profit_usd"]))
-                    execute_arbitrage(opp)
-                    break  # Stop after first executable — wait for next scan cycle
-            time.sleep(30)
+        opps = scan_arbitrage()
+        # Only execute the BEST opportunity per cycle, not all of them
+        for opp in opps:
+            if not state["running"]: break
+            if opp["executable"]:
+                log("ARB opportunity: "+opp["pair"]+" spread "+str(opp["spread_pct"])+"% est profit $"+str(opp["est_profit_usd"]))
+                execute_arbitrage(opp)
+                break  # Stop after first executable — wait for next scan cycle
+        time.sleep(30)
 
-    STRATEGIES = {"dca":run_dca,"grid":run_grid,"scalp":run_scalp,"copy":run_copy,"arb":run_arbitrage}
+STRATEGIES = {"dca":run_dca,"grid":run_grid,"scalp":run_scalp,"copy":run_copy,"arb":run_arbitrage}
 
 def start_bot(strategy, pair, mode, exchange=None, chain=None):
     if state["running"]:
