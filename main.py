@@ -3146,8 +3146,10 @@ if __name__=="__main__":
     state["license_expires"] = linfo.get("expires")
     state["license_days_left"] = linfo.get("days_remaining")
     if not valid:
-        log("LICENSE INVALID — bot will not start live trading", "ERROR")
-        # Still start in demo mode — dashboard accessible but trades blocked
+        error_msg = linfo.get("error", "License validation failed")
+        log(f"LICENSE INVALID — {error_msg}. Bot will not start.", "ERROR")
+        import sys
+        sys.exit(1)
     start_background_loops()
     server=HTTPServer(("0.0.0.0",port),Handler)
     log("Ready — open your URL to control the bot")

@@ -13,6 +13,7 @@ Endpoints:
                    Requires header: X-Control-Secret: <your secret>
 """
 
+import json
 import os
 import time
 import threading
@@ -113,6 +114,53 @@ def control():
 
     else:
         return jsonify({"error": f"Unknown action: '{action}'. Use pause|resume|stop|restart"}), 400
+
+
+# ── License status ──────────────────────────────────────────────────────────────
+
+LICENSE_URL = "https://raw.githubusercontent.com/bobwhite6973/my-trading-bot/release/keys.json"
+
+
+def check_license():
+    """
+    Check the LICENSE_KEY env var against the hosted keys.json.
+    Returns (valid: bool, info: dict).
+    """
+    license_key = os.environ.get("LICENSE_KEY", "").strip()
+    if not license_key:
+        return True, {"valid": True, "type": "demo", "expires": None, "days_remaining": None}
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(LICENSE_URL, headers={"User-Agent": "LeverBot/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            keys_data = json.loads(resp.read().decode())
+    except Exception:
+        return True, {"valid": True, "type": "cached", "expires": None, "days_remaining": None, "note": "fetch failed, assuming valid"}
+
+    for entry in keys_data:
+        if entry.get("key") == license_key:
+            expires_str = entry.get("expires")
+            days_left = None
+            if expires_str:
+                try:
+                    expires_dt = datetime.fromisoformat(expires_str)
+                    now = datetime.now(timezone.utc)
+                    if now > expires_dt:
+                        return False, {"valid": False, "type": entry.get("type", "trial"), "expires": expires_str, "days_remaining": 0, "error": "License expired"}
+                    days_left = (expires_dt - now).days
+                except Exception:
+                    pass
+            return True, {"valid": True, "type": entry.get("type", "full"), "expires": expires_str, "days_remaining": days_left}
+
+    return False, {"valid": False, "type": "invalid", "expires": None, "days_remaining": None, "error": "License key not found"}
+
+
+@app.route("/license_status", methods=["GET"])
+def license_status():
+    """Return current license status."""
+    valid, info = check_license()
+    return jsonify(info)
 
 
 @app.route("/health", methods=["GET"])
