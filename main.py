@@ -2348,19 +2348,27 @@ function pnlHtml(v) {
 }
 
 function runBacktest() {
-  var pair = document.getElementById("pair-select")?.value || state?.pair || "SOL/USDC";
-  var strategy = document.getElementById("strat-select")?.value || "grid";
-  apiFetch("/backtest", {method: "POST", body: JSON.stringify({pair: pair, strategy: strategy})})
+  var pair = document.getElementById("pair-select").value;
+  var strategy = document.getElementById("strat-select").value;
+  showToast("Running backtest on " + pair + "...", "info");
+  apiFetch("/backtest", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({pair: pair, strategy: strategy})
+  })
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.error) { showToast("Backtest error: " + d.error, "error"); return; }
-      var msg = "Backtest: " + d.total_trades + " trades | Win: " + d.win_rate + "% | PnL: $" + d.total_pnl.toFixed(2) + " | Drawdown: " + d.max_drawdown.toFixed(1) + "%";
+      var msg = "Backtest: " + d.total_trades + " trades | Win: " + d.win_rate + "% | PnL: $" + (d.total_pnl||0).toFixed(2) + " | Drawdown: " + (d.max_drawdown||0).toFixed(1) + "%";
       showToast(msg, "info");
       if (d.trades && d.trades.length) {
         var lines = d.trades.slice(0, 5).map(function(t) { return t.action + " @ $" + t.price.toFixed(2) + " PnL: $" + (t.pnl||0).toFixed(2); });
-        addLog("Backtest sample: " + lines.join(" | "));
+        addLog("Backtest: " + lines.join(" | "));
+      } else {
+        showToast("Backtest done: 0 simulated trades in range", "info");
       }
-    });
+    })
+    .catch(function(e) { showToast("Backtest failed: " + e, "error"); });
 }
 
 function togglePaper() {
