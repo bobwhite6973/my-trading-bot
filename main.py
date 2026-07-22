@@ -425,7 +425,7 @@ TOKENS = {
     "base":     {"USDT":"0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2","WETH":"0x4200000000000000000000000000000000000006"},
     "arbitrum": {"USDT":"0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9","WETH":"0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"},
     "polygon":  {"USDT":"0xc2132D05D31c914a87C6611C10748AEb04B58e8F","WMATIC":"0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"},
-    "monad":    {"USDT":"0x...","WMON":"0x..."},  # placeholder — Monad token addresses TBD
+    "monad":    {},  # TODO: add Monad token addresses when available
 }
 
 def dex_get_quote_1inch(chain, from_token, to_token, amount_wei):
@@ -2347,6 +2347,22 @@ function pnlHtml(v) {
   return "<span class='" + cls + "'>" + (v >= 0 ? "+" : "") + "$" + Math.abs(v).toFixed(2) + "</span>";
 }
 
+function runBacktest() {
+  var pair = document.getElementById("pair-select")?.value || state?.pair || "SOL/USDC";
+  var strategy = document.getElementById("strat-select")?.value || "grid";
+  apiFetch("/backtest", {method: "POST", body: JSON.stringify({pair: pair, strategy: strategy})})
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.error) { showToast("Backtest error: " + d.error, "error"); return; }
+      var msg = "Backtest: " + d.total_trades + " trades | Win: " + d.win_rate + "% | PnL: $" + d.total_pnl.toFixed(2) + " | Drawdown: " + d.max_drawdown.toFixed(1) + "%";
+      showToast(msg, "info");
+      if (d.trades && d.trades.length) {
+        var lines = d.trades.slice(0, 5).map(function(t) { return t.action + " @ $" + t.price.toFixed(2) + " PnL: $" + (t.pnl||0).toFixed(2); });
+        addLog("Backtest sample: " + lines.join(" | "));
+      }
+    });
+}
+
 function togglePaper() {
   apiFetch("/toggle_paper").then(function(r) { return r.json(); }).then(function(d) {
     var btn = document.getElementById("paper-btn");
@@ -2573,6 +2589,7 @@ class Handler(BaseHTTPRequestHandler):
             stop_bot()
             self.respond(200,"application/json",b'{"ok":true}')
         elif path=="/backtest":
+            if not self._auth_or_401(): return
             try: data = json.loads(self.rfile.read(int(self.headers.get("Content-Length",0))))
             except: data = {}
             pair = data.get("pair", state.get("pair", "SOL/USDC"))
@@ -2590,7 +2607,7 @@ class Handler(BaseHTTPRequestHandler):
                     ohlc = r.json().get("result", {})
                     for k in ohlc:
                         if k != "last":
-                            prices = [{"time": int(p[0])*1000, "value": float(p[4])} for p in ohlc[k][-200:]]
+                            prices = [{"time": int(p[0]), "value": float(p[4])} for p in ohlc[k][-200:]]
                 except: pass
             if not prices or len(prices) < 5:
                 self.respond(200,"application/json",json.dumps({"error":"Not enough price data"}).encode()); return
