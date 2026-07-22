@@ -1020,7 +1020,7 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
         signed_tx = VersionedTransaction.populate(tx_obj.message, [sig])
 
         # Submit
-        rpc = ("https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY) if ALCHEMY_KEY else "https://api.mainnet-beta.solana.com"
+        rpc = SOLANA_RPC if SOLANA_RPC else (("https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY) if ALCHEMY_KEY else "https://api.mainnet-beta.solana.com")
         r2 = requests.post(rpc, json={
             "jsonrpc":"2.0","id":1,"method":"sendTransaction",
             "params":[
@@ -1170,7 +1170,7 @@ def jupiter_swap(from_token, to_token, amount_input, price, dex=None):
                  "preflightCommitment":"confirmed","maxRetries":3}
             ]
         }
-        send_rpc = ("https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY) if ALCHEMY_KEY else "https://api.mainnet-beta.solana.com"
+        send_rpc = SOLANA_RPC if SOLANA_RPC else (("https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY) if ALCHEMY_KEY else "https://api.mainnet-beta.solana.com")
         r2 = requests.post(send_rpc, json=send_payload, timeout=15)
         result = r2.json()
         if result.get("error",{}).get("code") == 429:
@@ -3258,6 +3258,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200,"application/json",json.dumps({"error":str(ex)}).encode())
         elif path=="/toggle_paper":
             if not self._auth_or_401(): return
+            if not state.get("license_valid", True) and state["paper_trading"]:
+                self.respond(403,"application/json",json.dumps({"error":"Cannot enable live trading — invalid license"}).encode())
+                return
             state["paper_trading"] = not state["paper_trading"]
             mode = "PAPER" if state["paper_trading"] else "LIVE"
             log("Switched to "+mode+" trading mode")
