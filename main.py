@@ -617,15 +617,18 @@ SOL_TOKENS = {
     "SPCX":  "SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb",
 }
 
+# Shared Solana RPC endpoints
+SOL_RPCS = [
+    "https://api.mainnet-beta.solana.com",
+    "https://rpc.ankr.com/solana",
+    "https://solana-rpc.publicnode.com",
+]
+
 def sol_get_balance():
     """Get SOL + USDC + USDT balance. Tries multiple RPC endpoints for reliability."""
-    SOL_RPCS = [
-        "https://api.mainnet-beta.solana.com",
-        "https://rpc.ankr.com/solana",
-        "https://solana-rpc.publicnode.com",
-    ]
+    rpcs = list(SOL_RPCS)
     if ALCHEMY_KEY:
-        SOL_RPCS = ["https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY] + SOL_RPCS
+        rpcs = ["https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY] + rpcs
 
     wallet = cfg["sol_wallet"]
     if not wallet:
@@ -633,7 +636,7 @@ def sol_get_balance():
 
     def rpc_call(method, params):
         payload = {"jsonrpc":"2.0","id":1,"method":method,"params":params}
-        for rpc in SOL_RPCS:
+        for rpc in rpcs:
             try:
                 r = requests.post(rpc, json=payload, timeout=8)
                 result = r.json()
