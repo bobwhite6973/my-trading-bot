@@ -680,12 +680,9 @@ def start_background_loops():
         while True:
             try:
                 m = state.get("mode", "dex")
-                if cfg["wallet"]:
+                if cfg.get("wallet"):
                     dex_get_balance()
-                elif cfg["sol_wallet"]:
-                    sol_get_balance()
-                # Always show Solana balance if wallet is set, regardless of mode
-                if cfg["sol_wallet"]:
+                if cfg.get("sol_wallet"):
                     sol_get_balance()
             except Exception as ex:
                 log("Balance loop error: "+str(ex), "ERROR")
@@ -926,7 +923,6 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
                 blockhash_str = bh_json.get("result",{}).get("value",{}).get("blockhash","")
                 if not blockhash_str:
                     log("Could not get blockhash, response: "+str(bh_json)[:200], "WARN")
-                    return None
                     return None
 
                 blockhash = Hash.from_string(blockhash_str)
