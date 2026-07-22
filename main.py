@@ -1560,6 +1560,7 @@ def run_grid():
                         if price < trailing_low:
                             trailing_low = price
                             dip_occurred = True
+                    dip_mult = 1.5 if state.get("dip_active") else 1.0
                     # Buy: immediately if no dip, or on 0.5% bounce if dipped
                     if trailing_buy_active and i not in filled and size > 1:
                         should_buy = (not dip_occurred) or (price >= trailing_low * (1 + trailing_pct / 100))
