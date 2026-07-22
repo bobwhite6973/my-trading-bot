@@ -1090,11 +1090,14 @@ def jupiter_swap(from_token, to_token, amount_input, price, dex=None):
         out_human = out_lamports / (10 ** to_dec) if out_lamports > 0 else 0.0
         if out_human > 0:
             log("Raydium quote: "+str(amount_input)+" "+from_token+" → "+str(round(out_human,6))+" "+to_token)
-            return _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
+            ok, result_amt = _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
                 amount_input, out_human, price, side, via, lamports, rq, to_dec)
+            if ok:
+                return True, result_amt
+            log("Raydium execution failed, falling back to Jupiter...", "WARN")
 
     # Fallback: Jupiter
-    log("Raydium unavailable, trying Jupiter...", "WARN")
+    log("Trying Jupiter swap...", "INFO")
     try:
         r = requests.get("https://quote-api.jup.ag/v6/quote", params={
             "inputMint": from_mint,
