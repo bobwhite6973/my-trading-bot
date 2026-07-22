@@ -922,9 +922,11 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
                     "jsonrpc":"2.0","id":1,"method":"getLatestBlockhash",
                     "params":[{"commitment":"confirmed"}]
                 }, timeout=8)
-                blockhash_str = bh_r.json().get("result",{}).get("value",{}).get("blockhash","")
+                bh_json = bh_r.json()
+                blockhash_str = bh_json.get("result",{}).get("value",{}).get("blockhash","")
                 if not blockhash_str:
-                    log("Could not get blockhash", "WARN")
+                    log("Could not get blockhash, response: "+str(bh_json)[:200], "WARN")
+                    return None
                     return None
 
                 blockhash = Hash.from_string(blockhash_str)
@@ -952,8 +954,10 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
                 }
                 rpc = SOLANA_RPC if SOLANA_RPC else (("https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY) if ALCHEMY_KEY else "https://api.mainnet-beta.solana.com")
                 rr = requests.post(rpc, json=send_payload, timeout=15)
-                rr_result = rr.json().get("result","")
-                log("ATA creation tx: "+str(rr_result)[:40], "INFO")
+                rr_json = rr.json()
+                rr_result = rr_json.get("result","")
+                rr_error = rr_json.get("error",{})
+                log("ATA creation tx: "+str(rr_result)[:40]+" err="+str(rr_error)[:120], "INFO")
                 if rr_result:
                     # Wait for confirmation and verify
                     time.sleep(3)
