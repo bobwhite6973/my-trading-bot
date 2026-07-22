@@ -1509,6 +1509,13 @@ def run_grid():
     log("Grid started on "+str(state["active_pairs"])+" ("+state["mode"].upper()+")")
 
     while state["running"] and state["strategy"]=="grid":
+        # Check for new pairs added mid-run
+        for p in list(state["active_pairs"]):
+            if p not in state["grid_pairs"]:
+                gs = _init_grid_pair(p)
+                if gs:
+                    state["grid_pairs"][p] = gs
+                    log("Grid initialized for "+p+": "+str(gs["grids"]), "INFO")
         for pair in list(state["active_pairs"]):
             gs = state["grid_pairs"].get(pair)
             if not gs: continue
