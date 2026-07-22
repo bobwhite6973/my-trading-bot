@@ -105,7 +105,7 @@ def send_telegram(msg):
         if r.status_code != 200:
             log("Telegram error "+str(r.status_code)+": "+r.text[:200], "WARN")
     except Exception as e:
-        log("Telegram send failed: "+str(e), "WARN") — don't block trading
+        log("Telegram send failed: "+str(e), "WARN")
 
 def log(msg, level="INFO"):
     ts = time.strftime("%H:%M:%S")
