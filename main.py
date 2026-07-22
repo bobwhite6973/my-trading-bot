@@ -1590,20 +1590,16 @@ def calc_bbands(prices, period=20, stddev=2.0):
     return middle, upper, lower
 
 def get_price_history(pair, lookback=100):
-    """Fetch recent candle closes for the pair. Returns list of prices (most recent last)."""
-    prices = []
-    for source in ["raydium", "kraken", "coingecko"]:
-        try:
-            p = _fetch_price(source, pair)
-            if p and p > 0:
-                prices.append(p)
-                break
-        except Exception:
-            pass
-    # Build a simple price buffer from live ticks
+    """Fetch recent candle closes for the pair. Returns list of prices (most recent last).
+    Uses the live price ticker already maintained by the background price loop."""
     buf = state.get("_price_buf_" + pair, [])
-    if prices:
-        buf.append(prices[0])
+    try:
+        price = get_price(pair)
+        if price and price > 0:
+            if not buf or abs(price - buf[-1]) > 0.0001:
+                buf.append(price)
+    except Exception as e:
+        log("get_price_history warn: " + str(e), "WARN")
     if len(buf) > lookback:
         buf = buf[-lookback:]
     state["_price_buf_" + pair] = buf
@@ -2023,8 +2019,6 @@ def run_rsi_ema():
     order_size = cfg.get("order_size_usdc", 50)
     has_position = False
     entry_price = 0
-    prev_fast = None
-    prev_slow = None
     while state["running"] and state["strategy"] == "rsi_ema":
         while state["paused"]: time.sleep(1)
         try:
@@ -2040,8 +2034,8 @@ def run_rsi_ema():
             rsi_now = rsi_vals[-1]
             f_now, s_now = ema_f[-1], ema_s[-1]
             f_prev, s_prev = ema_f[-2] if len(ema_f) > 1 else None, ema_s[-2] if len(ema_s) > 1 else None
-            crossover_up = f_prev and s_prev and f_prev <= s_prev and f_now > s_now
-            crossover_down = f_prev and s_prev and f_prev >= s_prev and f_now < s_now
+            crossover_up = f_prev is not None and s_prev is not None and f_prev <= s_prev and f_now > s_now
+            crossover_down = f_prev is not None and s_prev is not None and f_prev >= s_prev and f_now < s_now
             # Buy signal
             if not has_position and rsi_now and rsi_now < rsi_oversold and crossover_up:
                 amt = round(order_size / price, 6)
@@ -2055,7 +2049,13 @@ def run_rsi_ema():
             elif has_position:
                 sell_signal = False
                 reason = ""
-                if rsi_now and rsi_now > rsi_overbought:
+                # Hard stop-loss
+                stop_loss_pct = cfg.get("stop_loss_pct", 5.0)
+                loss_pct = (price - entry_price) / entry_price * 100
+                if loss_pct <= -stop_loss_pct:
+                    sell_signal = True
+                    reason = "Stop-loss " + str(round(stop_loss_pct,1)) + "%"
+                elif rsi_now and rsi_now > rsi_overbought:
                     sell_signal = True
                     reason = "RSI overbought " + str(round(rsi_now, 1))
                 elif crossover_down:
@@ -2123,7 +2123,12 @@ def run_bbands():
                 trail_pct = cfg.get("trailing_pct", 1.5)
                 sell_signal = False
                 reason = ""
-                if price >= upper_now:
+                # Hard stop-loss
+                stop_loss_pct = cfg.get("stop_loss_pct", 5.0)
+                if pnl_pct <= -stop_loss_pct:
+                    sell_signal = True
+                    reason = "Stop-loss " + str(round(stop_loss_pct,1)) + "%"
+                elif price >= upper_now:
                     sell_signal = True
                     reason = "Upper band $" + str(round(upper_now, 2))
                 elif pnl_pct >= 1.0:
@@ -2181,6 +2186,9 @@ def stop_bot():
     state["running"]=False
     state["strategy"]=None
     state["active_pairs"]=[]
+    for k in list(state.keys()):
+        if k.startswith("_rsi_peak_") or k.startswith("_bb_peak_"):
+            del state[k]
     log("Bot stopped")
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -3278,6 +3286,109 @@ class Handler(BaseHTTPRequestHandler):
             log("Bot "+("paused" if state["paused"] else "resumed"))
             self.respond(200,"application/json",json.dumps({"paused":state["paused"]}).encode())
             return
+        elif path=="/webhook":
+            if not self._auth_or_401(): return
+            signal = data.get("signal","")
+            wpair = data.get("pair",state.get("pair","SOL/USDC"))
+            wprice = data.get("price", 0.0)
+            if signal == "buy" and wprice > 0:
+                gs = state["grid_pairs"].get(wpair, {})
+                grids = gs.get("grids", [])
+                filled = gs.get("filled", {})
+                mid_idx = gs.get("mid_idx", len(grids)//2) if grids else 2
+                if not grids:
+                    levels=5; spread_val=cfg.get("base_spread",0.05)
+                    grids = [round(wprice*(1-spread_val)+i*(wprice*spread_val*2/levels),4) for i in range(levels+1)]
+                    mid_idx = len(grids)//2
+                    state["grid_pairs"][wpair] = {"grids":grids,"mid_idx":mid_idx,"filled":{}}
+                    if wpair not in state.get("active_pairs",[]): state["active_pairs"].append(wpair)
+                bal = get_balance()
+                sz = min(bal*cfg["risk_pct"]/100, cfg["max_pos"])/5
+                amt = round(sz/wprice,6)
+                if place_order(wpair,"buy",amt):
+                    for i,g in enumerate(grids[:-1]):
+                        if g <= wprice < grids[i+1] and i < mid_idx and i not in filled:
+                            filled[i] = {"price":wprice,"amount":amt}
+                            state["grid_pairs"][wpair]["filled"] = filled
+                            record_trade("WEBHOOK-BUY",wprice,amt)
+                            log("[WEBHOOK] Forced buy "+wpair+" @ $"+str(round(wprice,2)))
+                            break
+                self.respond(200,"application/json",json.dumps({"ok":True,"pair":wpair}).encode())
+            elif signal == "sell":
+                gs = state["grid_pairs"].get(wpair, {})
+                filled = gs.get("filled", {})
+                sold = 0
+                for bi in sorted(filled.keys()):
+                    amt = filled[bi]["amount"]
+                    bp = filled[bi]["price"]
+                    sp = wprice if wprice > 0 else get_price(wpair)
+                    if place_order(wpair,"sell",amt):
+                        pnl = (sp - bp) * amt
+                        state["pnl"] += pnl
+                        record_trade("WEBHOOK-SELL",sp,amt,round(pnl,2))
+                        log("[WEBHOOK] Forced sell "+wpair+" @ $"+str(round(sp,2)))
+                        sold += 1
+                state["grid_pairs"][wpair]["filled"] = {}
+                self.respond(200,"application/json",json.dumps({"ok":True,"pair":wpair,"closed":sold}).encode())
+            else:
+                self.respond(400,"application/json",json.dumps({"error":"signal must be buy or sell"}).encode())
+        elif path=="/backtest":
+            if not self._auth_or_401(): return
+            pair = data.get("pair", state.get("pair", "SOL/USDC"))
+            strategy = data.get("strategy", "grid")
+            prices = []
+            if state.get("price_history") and len(state["price_history"]) > 5:
+                prices = state["price_history"]
+            else:
+                try:
+                    r = requests.get("https://api.kraken.com/0/public/OHLC", params={
+                        "pair": pair.replace("/",""), "interval": 5
+                    }, timeout=10)
+                    ohlc = r.json().get("result", {})
+                    for k in ohlc:
+                        if k != "last":
+                            prices = [{"time": int(p[0]), "value": float(p[4])} for p in ohlc[k][-200:]]
+                except Exception: pass
+            if not prices or len(prices) < 5:
+                self.respond(200,"application/json",json.dumps({"error":"Not enough price data"}).encode()); return
+            trades = []; pnl_total = 0; wins = 0; peak_equity = 0; max_dd = 0; equity = 100
+            levels=5; spread_val=cfg.get("base_spread",0.05)
+            base_price = prices[0]["value"]
+            grids = [round(base_price*(1-spread_val)+i*(base_price*spread_val*2/levels),4) for i in range(levels+1)]
+            mid_idx = len(grids)//2; filled = {}
+            for pt in prices[1:]:
+                pr = pt["value"]
+                if pr <= 0: continue
+                if pr < grids[0]*0.98 or pr > grids[-1]*1.02:
+                    base_price = pr
+                    grids = [round(pr*(1-spread_val)+i*(pr*spread_val*2/levels),4) for i in range(levels+1)]
+                    mid_idx = len(grids)//2
+                for i,g in enumerate(grids[:-1]):
+                    ng = grids[i+1]
+                    if g <= pr < ng:
+                        is_buy = i < mid_idx
+                        if is_buy and i not in filled:
+                            filled[i] = {"price":pr,"amount":1}
+                        elif not is_buy:
+                            for bi in sorted(filled.keys()):
+                                if bi < i:
+                                    bp = filled[bi]["price"]
+                                    pnl = pr - bp
+                                    pnl_total += pnl; equity += pnl
+                                    if equity > peak_equity: peak_equity = equity
+                                    dd = peak_equity - equity
+                                    if dd > max_dd: max_dd = dd
+                                    if pnl > 0: wins += 1
+                                    trades.append({"action":"sell","price":pr,"buy_price":bp,"pnl":round(pnl,2),"time":pt["time"]})
+                                    del filled[bi]; break
+            result = {
+                "total_trades": len(trades),
+                "win_rate": round(wins/max(len(trades),1)*100,1),
+                "total_pnl": round(pnl_total,2),
+                "max_drawdown": round(max_dd,2),
+                "trades": trades[-20:]
+            }
+            self.respond(200,"application/json",json.dumps(result).encode())
         else:
             self.respond(404,"text/plain",b"Not found")
 
@@ -3342,6 +3453,109 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(200,"application/json",json.dumps({"ok":True,"price":price,"amount":token_amt,"pair":pair,"received":round(received,2)}).encode())
                 else:
                     self.respond(500,"application/json",json.dumps({"error":"Sell order failed"}).encode())
+        elif path=="/webhook":
+            if not self._auth_or_401(): return
+            signal = data.get("signal","")
+            wpair = data.get("pair",state.get("pair","SOL/USDC"))
+            wprice = data.get("price", 0.0)
+            if signal == "buy" and wprice > 0:
+                gs = state["grid_pairs"].get(wpair, {})
+                grids = gs.get("grids", [])
+                filled = gs.get("filled", {})
+                mid_idx = gs.get("mid_idx", len(grids)//2) if grids else 2
+                if not grids:
+                    levels=5; spread_val=cfg.get("base_spread",0.05)
+                    grids = [round(wprice*(1-spread_val)+i*(wprice*spread_val*2/levels),4) for i in range(levels+1)]
+                    mid_idx = len(grids)//2
+                    state["grid_pairs"][wpair] = {"grids":grids,"mid_idx":mid_idx,"filled":{}}
+                    if wpair not in state.get("active_pairs",[]): state["active_pairs"].append(wpair)
+                bal = get_balance()
+                sz = min(bal*cfg["risk_pct"]/100, cfg["max_pos"])/5
+                amt = round(sz/wprice,6)
+                if place_order(wpair,"buy",amt):
+                    for i,g in enumerate(grids[:-1]):
+                        if g <= wprice < grids[i+1] and i < mid_idx and i not in filled:
+                            filled[i] = {"price":wprice,"amount":amt}
+                            state["grid_pairs"][wpair]["filled"] = filled
+                            record_trade("WEBHOOK-BUY",wprice,amt)
+                            log("[WEBHOOK] Forced buy "+wpair+" @ $"+str(round(wprice,2)))
+                            break
+                self.respond(200,"application/json",json.dumps({"ok":True,"pair":wpair}).encode())
+            elif signal == "sell":
+                gs = state["grid_pairs"].get(wpair, {})
+                filled = gs.get("filled", {})
+                sold = 0
+                for bi in sorted(filled.keys()):
+                    amt = filled[bi]["amount"]
+                    bp = filled[bi]["price"]
+                    sp = wprice if wprice > 0 else get_price(wpair)
+                    if place_order(wpair,"sell",amt):
+                        pnl = (sp - bp) * amt
+                        state["pnl"] += pnl
+                        record_trade("WEBHOOK-SELL",sp,amt,round(pnl,2))
+                        log("[WEBHOOK] Forced sell "+wpair+" @ $"+str(round(sp,2)))
+                        sold += 1
+                state["grid_pairs"][wpair]["filled"] = {}
+                self.respond(200,"application/json",json.dumps({"ok":True,"pair":wpair,"closed":sold}).encode())
+            else:
+                self.respond(400,"application/json",json.dumps({"error":"signal must be buy or sell"}).encode())
+        elif path=="/backtest":
+            if not self._auth_or_401(): return
+            pair = data.get("pair", state.get("pair", "SOL/USDC"))
+            strategy = data.get("strategy", "grid")
+            prices = []
+            if state.get("price_history") and len(state["price_history"]) > 5:
+                prices = state["price_history"]
+            else:
+                try:
+                    r = requests.get("https://api.kraken.com/0/public/OHLC", params={
+                        "pair": pair.replace("/",""), "interval": 5
+                    }, timeout=10)
+                    ohlc = r.json().get("result", {})
+                    for k in ohlc:
+                        if k != "last":
+                            prices = [{"time": int(p[0]), "value": float(p[4])} for p in ohlc[k][-200:]]
+                except Exception: pass
+            if not prices or len(prices) < 5:
+                self.respond(200,"application/json",json.dumps({"error":"Not enough price data"}).encode()); return
+            trades = []; pnl_total = 0; wins = 0; peak_equity = 0; max_dd = 0; equity = 100
+            levels=5; spread_val=cfg.get("base_spread",0.05)
+            base_price = prices[0]["value"]
+            grids = [round(base_price*(1-spread_val)+i*(base_price*spread_val*2/levels),4) for i in range(levels+1)]
+            mid_idx = len(grids)//2; filled = {}
+            for pt in prices[1:]:
+                pr = pt["value"]
+                if pr <= 0: continue
+                if pr < grids[0]*0.98 or pr > grids[-1]*1.02:
+                    base_price = pr
+                    grids = [round(pr*(1-spread_val)+i*(pr*spread_val*2/levels),4) for i in range(levels+1)]
+                    mid_idx = len(grids)//2
+                for i,g in enumerate(grids[:-1]):
+                    ng = grids[i+1]
+                    if g <= pr < ng:
+                        is_buy = i < mid_idx
+                        if is_buy and i not in filled:
+                            filled[i] = {"price":pr,"amount":1}
+                        elif not is_buy:
+                            for bi in sorted(filled.keys()):
+                                if bi < i:
+                                    bp = filled[bi]["price"]
+                                    pnl = pr - bp
+                                    pnl_total += pnl; equity += pnl
+                                    if equity > peak_equity: peak_equity = equity
+                                    dd = peak_equity - equity
+                                    if dd > max_dd: max_dd = dd
+                                    if pnl > 0: wins += 1
+                                    trades.append({"action":"sell","price":pr,"buy_price":bp,"pnl":round(pnl,2),"time":pt["time"]})
+                                    del filled[bi]; break
+            result = {
+                "total_trades": len(trades),
+                "win_rate": round(wins/max(len(trades),1)*100,1),
+                "total_pnl": round(pnl_total,2),
+                "max_drawdown": round(max_dd,2),
+                "trades": trades[-20:]
+            }
+            self.respond(200,"application/json",json.dumps(result).encode())
         else:
             self.respond(404,"text/plain",b"Not found")
     
