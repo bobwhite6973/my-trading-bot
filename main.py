@@ -1947,6 +1947,9 @@ def start_bot(strategy, pair, mode, exchange=None, chain=None):
             log("Added "+pair+" to active grids ("+str(len(state["active_pairs"]))+" total)")
             return
         log("Already running — stop first","WARN"); return
+    if not state.get("license_valid", True) and not state.get("paper_trading", True):
+        log("Cannot start live trading -- invalid license", "ERROR")
+        return
     state["strategy"]=strategy
     state["pair"]=pair
     state["mode"]=mode
@@ -3032,6 +3035,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200,"application/json",json.dumps({"error":str(ex)}).encode())
         elif path=="/toggle_paper":
             if not self._auth_or_401(): return
+            if not state.get("license_valid", True) and state["paper_trading"]:
+                self.respond(403,"application/json",json.dumps({"error":"Cannot enable live trading -- invalid license"}).encode())
+                return
             state["paper_trading"] = not state["paper_trading"]
             mode = "PAPER" if state["paper_trading"] else "LIVE"
             log("Switched to "+mode+" trading mode")
