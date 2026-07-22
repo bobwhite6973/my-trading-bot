@@ -932,16 +932,16 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
                 blockhash = Hash.from_string(blockhash_str)
 
                 create_ix = Instruction(
-                    ata_prog,
-                    [   # accounts
+                    program_id=ata_prog,
+                    data=bytes(),
+                    accounts=[
                         AccountMeta(wallet_pk, True, True),    # payer
                         AccountMeta(ata_pk,    False, True),   # ata
                         AccountMeta(wallet_pk, False, False),  # owner
                         AccountMeta(mint_pk,   False, False),  # mint
                         AccountMeta(sys_prog,  False, False),  # system program
                         AccountMeta(token_prog,False, False),  # token program
-                    ],
-                    bytes()   # ATA Create instruction has no data
+                    ]
                 )
                 msg = MessageV0.try_compile(wallet_pk, [create_ix], [], blockhash)
                 tx = VersionedTransaction(msg, [keypair])
