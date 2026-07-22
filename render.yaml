@@ -1,0 +1,45 @@
+# Render Blueprint — LeverBot
+# One-click deploy configuration
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: leverbot
+    env: python
+    region: oregon
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: LICENSE_KEY
+        sync: false
+      - key: SOLANA_PRIVATE_KEY
+        sync: false
+      - key: PAPER_TRADING
+        value: "true"
+      - key: API_SECRET
+        sync: false
+      - key: TG_BOT_TOKEN
+        sync: false
+      - key: TG_CHAT_ID
+        sync: false
+      - key: AUTO_COMPOUND
+        value: "true"
+      - key: PARTIAL_SELL_PCT
+        value: "50"
+      - key: MAX_POSITION_USD
+        value: "500"
+      - key: MAX_DAILY_LOSS_USD
+        value: "200"
+      - key: RISK_PCT
+        value: "2"
+      - key: COOLDOWN
+        value: "30"
+      - key: SLIPPAGE
+        value: "1.0"
+      - key: DYNAMIC_SPREAD
+        value: "true"
+      - key: BASE_SPREAD
+        value: "0.05"
