@@ -780,8 +780,55 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
                 log("ATA PDA error: "+str(e)[:80], "WARN")
                 return None
         def create_ata_if_missing(wallet_addr, mint_addr):
-            """Return ATA address — Raydium handles creation if needed."""
-            return get_ata(wallet_addr, mint_addr)
+            """Create ATA on-chain. Returns address. Idempotent — safe to call on existing ATAs."""
+            ata = get_ata(wallet_addr, mint_addr)
+            if not ata:
+                return None
+            try:
+                from solders.pubkey import Pubkey
+                from solders.hash import Hash
+                from solders.instruction import AccountMeta, Instruction
+                from solders.message import MessageV0
+                wallet_pk = Pubkey.from_string(wallet_addr)
+                mint_pk   = Pubkey.from_string(mint_addr)
+                ata_pk     = Pubkey.from_string(ata)
+                token_prog = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+                ata_prog   = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bsU")
+                sys_prog   = Pubkey.from_string("11111111111111111111111111111111")
+                rpcs = list(SOL_RPCS)
+                if ALCHEMY_KEY:
+                    rpcs = ["https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY] + rpcs
+                bh = None
+                for rpc in rpcs:
+                    try:
+                        r2 = requests.post(rpc, json={"jsonrpc":"2.0","id":1,"method":"getLatestBlockhash","params":[{"commitment":"processed"}]}, timeout=10)
+                        bh = r2.json().get("result",{}).get("value",{}).get("blockhash","")
+                        if bh: break
+                    except: continue
+                if not bh:
+                    return ata  # Can't create now, return address anyway
+                ix = Instruction(ata_prog, bytes([0]), [
+                    AccountMeta(wallet_pk, True, True),
+                    AccountMeta(ata_pk, False, True),
+                    AccountMeta(wallet_pk, False, False),
+                    AccountMeta(mint_pk, False, False),
+                    AccountMeta(sys_prog, False, False),
+                    AccountMeta(token_prog, False, False),
+                    AccountMeta(sys_prog, False, False),
+                ])
+                msg = MessageV0.try_compile(wallet_pk, [ix], [], Hash.from_string(bh))
+                sig = keypair.sign_message(solders_message.to_bytes_versioned(msg))
+                signed = VersionedTransaction.populate(msg, [sig])
+                for rpc in rpcs:
+                    try:
+                        sr = requests.post(rpc, json={"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":[b64.b64encode(bytes(signed)).decode(),{"encoding":"base64","skipPreflight":True,"maxRetries":3}]}, timeout=15)
+                        if sr.json().get("result"):
+                            time.sleep(2)
+                            return ata
+                    except: continue
+            except Exception as e:
+                log("ATA create: "+str(e)[:80], "WARN")
+            return ata
         if not input_ata:
             input_ata = create_ata_if_missing(wallet, from_mint)
         if not input_ata:
@@ -795,6 +842,9 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
             log("Cannot swap — no output ATA for "+to_token, "WARN")
             return False, 0.0
 
+        # Create output ATA if buying (needed for tokens not yet held)
+        if side == "BUY" and output_ata:
+            create_ata_if_missing(wallet, to_mint)
         # Build Raydium swap transaction payload
         swap_payload = {
             "computeUnitPriceMicroLamports": "10000",
