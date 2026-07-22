@@ -1786,6 +1786,11 @@ STRATEGIES = {"dca":run_dca,"grid":run_grid,"scalp":run_scalp,"copy":run_copy,"a
 
 def start_bot(strategy, pair, mode, exchange=None, chain=None):
     if state["running"]:
+        # Multi-pair: if grid is already running, add new pair without restarting
+        if strategy == "grid" and pair not in state.get("active_pairs", []):
+            state["active_pairs"].append(pair)
+            log("Added "+pair+" to active grids ("+str(len(state["active_pairs"]))+" total)")
+            return
         log("Already running — stop first","WARN"); return
     state["strategy"]=strategy
     state["pair"]=pair
