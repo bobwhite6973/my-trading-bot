@@ -8,11 +8,112 @@ Strategies: DCA, Grid, Scalping, Copy Trading, Arbitrage
 import os, json, time, hmac, hashlib, threading, requests, logging, base64, random, string
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
+from datetime import datetime, timezone, timedelta
 os.environ["TZ"] = "US/Eastern"
 time.tzset()
 
 logging.basicConfig(level=logging.WARNING)
 TOKEN_DECIMALS = {"USDC": 6, "USDT": 6, "SOL": 9, "BTC": 8, "ETH": 8, "JUP": 6, "BONK": 5, "WIF": 6, "SPCX": 6}
+
+
+# ── License Validation ──────────────────────────────────────────────────────────
+LICENSE_URL = "https://raw.githubusercontent.com/bobwhite6973/my-trading-bot/release/keys.json"
+LICENSE_CACHE_FILE = ".license_cache"
+GRACE_HOURS = 48
+
+def _cache_write(data):
+    try:
+        with open(LICENSE_CACHE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+def _cache_read():
+    try:
+        with open(LICENSE_CACHE_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def validate_license():
+    """
+    Validate the LICENSE_KEY env var against the hosted keys.json.
+    Returns (valid: bool, info: dict) where info has expires/type/days_remaining.
+    On network failure, allows a 48-hour grace period from last successful check.
+    """
+    license_key = os.environ.get("LICENSE_KEY", "").strip()
+    if not license_key:
+        print("LICENSE_KEY not set — running in DEMO mode (paper trading only)")
+        return True, {"valid": True, "type": "demo", "expires": None, "days_remaining": None}
+
+    # Try to fetch the keys file
+    keys_data = None
+    fetch_ok = False
+    try:
+        import urllib.request
+        req = urllib.request.Request(LICENSE_URL, headers={"User-Agent": "LeverBot/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            keys_data = json.loads(resp.read().decode())
+        fetch_ok = True
+    except Exception as e:
+        print(f"License fetch failed: {e}")
+
+    if not fetch_ok or keys_data is None:
+        # Grace period: check cache
+        cache = _cache_read()
+        if cache and cache.get("key") == license_key:
+            last_ok = cache.get("last_checked")
+            if last_ok:
+                try:
+                    last_dt = datetime.fromisoformat(last_ok)
+                    if (datetime.now(timezone.utc) - last_dt) < timedelta(hours=GRACE_HOURS):
+                        print(f"License: using cached validation (last check: {last_ok})")
+                        return True, cache.get("info", {"valid": True, "type": "cached", "expires": None, "days_remaining": None})
+                except Exception:
+                    pass
+        print("License validation failed — network error and no valid cache. Restart when online.")
+        return False, {"valid": False, "type": "error", "expires": None, "days_remaining": None, "error": "Cannot reach license server"}
+
+    # Search for the key
+    match = None
+    for entry in keys_data:
+        if entry.get("key") == license_key:
+            match = entry
+            break
+
+    if not match:
+        print(f"Invalid license key: {license_key[:12]}...")
+        return False, {"valid": False, "type": "invalid", "expires": None, "days_remaining": None, "error": "License key not found"}
+
+    # Check expiry
+    expires_str = match.get("expires")
+    if expires_str:
+        try:
+            expires_dt = datetime.fromisoformat(expires_str)
+            now = datetime.now(timezone.utc)
+            if now > expires_dt:
+                print(f"License expired on {expires_str[:10]}")
+                return False, {"valid": False, "type": match.get("type", "trial"), "expires": expires_str, "days_remaining": 0, "error": "License expired"}
+            days_left = (expires_dt - now).days
+        except Exception:
+            days_left = None
+    else:
+        days_left = None  # Full key, no expiry
+
+    # Valid — cache and return
+    info = {
+        "valid": True,
+        "type": match.get("type", "full"),
+        "expires": expires_str,
+        "days_remaining": days_left,
+    }
+    _cache_write({"key": license_key, "last_checked": datetime.now(timezone.utc).isoformat(), "info": info})
+
+    if expires_str:
+        print(f"License valid until {expires_str[:10]} ({days_left} days remaining)")
+    else:
+        print("License valid (full — no expiry)")
+    return True, info
 
 # ── Config from environment ───────────────────────────────────────────────────
 cfg = {
@@ -39,6 +140,7 @@ cfg = {
     "paper_trading":   os.environ.get("PAPER_TRADING", "true").lower() != "false",
     "auto_compound":   os.environ.get("AUTO_COMPOUND", "true").lower() != "false",
     "partial_sell_pct":  max(1, min(99, float(os.environ.get("PARTIAL_SELL_PCT", "50")))),
+    "license_key":   os.environ.get("LICENSE_KEY", ""),
     "tg_bot_token":    os.environ.get("TG_BOT_TOKEN", ""),
     "tg_chat_id":      os.environ.get("TG_CHAT_ID", ""),
 }
@@ -68,6 +170,10 @@ state = {
     "error":         None,
     "arb_opps":      [],
     "paper_trading": cfg["paper_trading"],
+    "license_valid":  True,
+    "license_type":   "demo",
+    "license_expires": None,
+    "license_days_left": None,
     "trading_lock":  False,   # Prevent simultaneous trades
     "last_trade_time": 0,     # Cooldown between trades
     # Dashboard UI fields
@@ -2018,6 +2124,15 @@ td{padding:8px 0;border-bottom:1px solid var(--border);color:var(--text2)}
       </select>
       <button class="btn" onclick="switchPair()" title="One-click pair switch" style="padding:9px 12px">&#128260;</button>
     </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:flex-end">
+      <div style="flex:1">
+        <input type="text" id="custom-mint" placeholder="Paste Solana token mint address..." style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:12px;background:var(--card);color:var(--text)"/>
+      </div>
+      <div style="width:70px">
+        <input type="text" id="custom-symbol" placeholder="Symbol" maxlength="10" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:12px;background:var(--card);color:var(--text);text-transform:uppercase"/>
+      </div>
+      <button class="btn" onclick="addCustomToken()" style="white-space:nowrap;font-size:11px">+ Add Token</button>
+    </div>
 
     <div class="action-bar">
       <button class="btn-start" id="start-btn" onclick="startBot()" disabled>Select options above</button>
@@ -2311,6 +2426,37 @@ function exportCSV() {
   a.href = url; a.download = "trades_" + new Date().toISOString().slice(0,10) + ".csv";
   a.click(); URL.revokeObjectURL(url);
   showToast("Exported " + tradeLog.length + " trades", "info");
+}
+
+function addCustomToken() {
+  var mint = document.getElementById("custom-mint").value.trim();
+  var symbol = document.getElementById("custom-symbol").value.trim().toUpperCase();
+  if (!mint || !symbol) { showToast("Enter mint address and symbol", "error"); return; }
+  if (mint.length < 32 || mint.length > 44) { showToast("Invalid mint address", "error"); return; }
+  // Add to dropdown
+  var pair = symbol + "/USDC";
+  var optgroup = document.getElementById("usdc-optgroup");
+  var existing = document.querySelector("#usdc-optgroup option[value='" + pair + "']");
+  if (existing) { showToast(pair + " already exists", "error"); return; }
+  var opt = document.createElement("option");
+  opt.value = pair; opt.textContent = pair;
+  optgroup.appendChild(opt);
+  // Notify server to add mint
+  apiFetch("/add_token", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({symbol: symbol, mint: mint, pair: pair})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.ok) {
+      document.getElementById("pair-select").value = pair;
+      selectPair(pair);
+      document.getElementById("custom-mint").value = "";
+      document.getElementById("custom-symbol").value = "";
+      showToast("Added " + pair, "info");
+    } else {
+      showToast(d.error || "Failed to add token", "error");
+    }
+  }).catch(function(e) { showToast("Error adding token", "error"); });
 }
 
 function switchPair() {
@@ -2730,6 +2876,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200,"application/json",json.dumps({"price":state.get("price",0),"running":state.get("running",False),"strategy":state.get("strategy",""),"pair":state.get("pair",""),"mode":state.get("mode",""),"paper_trading":state.get("paper_trading",True)}).encode())
                 return
             self.respond(200,"application/json",json.dumps(state).encode())
+        elif path=="/license_status":
+            info = {
+                "valid": state.get("license_valid", True),
+                "type": state.get("license_type", "unknown"),
+                "expires": state.get("license_expires"),
+                "days_remaining": state.get("license_days_left"),
+            }
+            self.respond(200, "application/json", json.dumps(info).encode())
         elif path=="/start":
             if not self._auth_or_401(): return
             start_bot(
@@ -2883,6 +3037,24 @@ class Handler(BaseHTTPRequestHandler):
             log("Switched to "+mode+" trading mode")
             self.respond(200,"application/json",json.dumps({"paper_trading":state["paper_trading"]}).encode())
             return
+        elif path=="/add_token":
+            if not self._auth_or_401(): return
+            try:
+                body_len = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(body_len) if body_len > 0 else b"{}"
+                token_data = json.loads(raw)
+            except Exception:
+                self.respond(400,"application/json",json.dumps({"error":"Invalid JSON"}).encode()); return
+            symbol = token_data.get("symbol", "").upper()
+            mint = token_data.get("mint", "")
+            pair = token_data.get("pair", "")
+            if not symbol or not mint:
+                self.respond(400,"application/json",json.dumps({"error":"Symbol and mint required"}).encode()); return
+            SOL_TOKENS[symbol] = mint
+            TOKEN_DECIMALS[symbol] = 6  # default 6 decimals
+            log("Added custom token: "+symbol+" ("+mint+")")
+            self.respond(200,"application/json",json.dumps({"ok":True,"symbol":symbol,"pair":pair}).encode())
+            return
         elif path=="/pause":
             if not self._auth_or_401(): return
             state["paused"] = not state["paused"]
@@ -2968,6 +3140,14 @@ class Handler(BaseHTTPRequestHandler):
 if __name__=="__main__":
     port=int(os.environ.get("PORT",10000))
     log("Bot dashboard starting on port "+str(port))
+    valid, linfo = validate_license()
+    state["license_valid"] = valid
+    state["license_type"] = linfo.get("type", "unknown")
+    state["license_expires"] = linfo.get("expires")
+    state["license_days_left"] = linfo.get("days_remaining")
+    if not valid:
+        log("LICENSE INVALID — bot will not start live trading", "ERROR")
+        # Still start in demo mode — dashboard accessible but trades blocked
     start_background_loops()
     server=HTTPServer(("0.0.0.0",port),Handler)
     log("Ready — open your URL to control the bot")
