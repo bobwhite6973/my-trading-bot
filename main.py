@@ -621,9 +621,8 @@ def sol_get_balance():
     """Get SOL + USDC + USDT balance. Tries multiple RPC endpoints for reliability."""
     SOL_RPCS = [
         "https://api.mainnet-beta.solana.com",
-        "https://solana-api.projectserum.com",
         "https://rpc.ankr.com/solana",
-        "https://solana.public-rpc.com",
+        "https://solana-rpc.publicnode.com",
     ]
     if ALCHEMY_KEY:
         SOL_RPCS = ["https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY] + SOL_RPCS
@@ -764,8 +763,7 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
         # ── ATA helpers ────────────────────────────────────────────────────
         def get_ata(wallet_addr, mint_addr):
             """Find existing Associated Token Account for a wallet+mint."""
-            rpcs = ["https://api.mainnet-beta.solana.com",
-                    "https://solana-api.projectserum.com"]
+            rpcs = list(SOL_RPCS)
             if ALCHEMY_KEY:
                 rpcs = ["https://solana-mainnet.g.alchemy.com/v2/"+ALCHEMY_KEY] + rpcs
             payload = {
