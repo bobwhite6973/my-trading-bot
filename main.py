@@ -753,6 +753,11 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
         if not private_key or not wallet:
             log("SOL_PRIVATE_KEY or SOL_WALLET_ADDRESS not set", "WARN")
             return False, 0.0
+        # Check USDC balance before attempting swap
+        usdc_bal = state.get("sol_usdc", 0)
+        if from_token in ("USDC","USDT") and usdc_bal > 0 and amount_input > usdc_bal:
+            log(f"Insufficient USDC: need ${amount_input:.2f}, have ${usdc_bal:.2f}", "WARN")
+            return False, 0.0
 
         keypair = Keypair.from_base58_string(private_key)
 
@@ -1011,6 +1016,11 @@ def jupiter_swap(from_token, to_token, amount_input, price, dex=None):
         wallet      = cfg.get("sol_wallet","")
         if not private_key or not wallet:
             log("SOL_PRIVATE_KEY or SOL_WALLET_ADDRESS not set", "WARN")
+            return False, 0.0
+        # Check USDC balance before attempting swap
+        usdc_bal = state.get("sol_usdc", 0)
+        if from_token in ("USDC","USDT") and usdc_bal > 0 and amount_input > usdc_bal:
+            log(f"Insufficient USDC: need ${amount_input:.2f}, have ${usdc_bal:.2f}", "WARN")
             return False, 0.0
 
         try:
@@ -1376,8 +1386,10 @@ def place_order(pair, side, amount):
             if side in ("buy","buy_market"):
                 # amount is token quantity, jupiter_swap needs USDC cost
                 cost = amount * price
+                log(f"place_order BUY: amt={amount} price={price} cost={cost} pair={pair}", "DEBUG")
                 result = jupiter_swap(stablecoin, token, cost, price, dex="Raydium")
             else:
+                log(f"place_order SELL: amt={amount} price={price} pair={pair}", "DEBUG")
                 result = jupiter_swap(token, stablecoin, amount, price, dex="Raydium")
             # jupiter_swap returns (success_bool, amount) tuple — unpack it
             if isinstance(result, tuple):
