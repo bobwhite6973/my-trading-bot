@@ -6,6 +6,8 @@ Price feeds: Kraken (no key needed)
 Strategies: DCA, Grid, Scalping, Copy Trading, Arbitrage
 """
 import os, json, time, hmac, hashlib, threading, requests, logging, base64, random, string
+
+TRADE_LOG = "trade_history.log"  # persistent trade log
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timezone, timedelta
@@ -1045,7 +1047,7 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
                 except Exception:
                     pass
             if tx_ok:
-                log("RAYDIUM SWAP CONFIRMED: "+tx_sig[:20]+"... "+from_token+"→"+to_token+via)
+                log("RAYDIUM SWAP CONFIRMED: "+tx_sig[:20]+"... "+from_token+"→"+to_token+via); log_trade_to_file({"event":"SWAP_OK","time":time.strftime("%H:%M:%S"),"router":"Raydium","pair":from_token+"/"+to_token,"side":side,"tx":tx_sig[:20]})
                 trade = {"time":time.strftime("%H:%M:%S"),"side":"LIVE-"+side+via,
                          "price":price,"amount":out_human,"router":"Raydium",
                          "chain":"solana","tx":tx_sig[:20]}
@@ -1053,7 +1055,7 @@ def _raydium_execute_swap(from_token, to_token, from_mint, to_mint,
                 return True, out_human
             else:
                 err_msg = str(vresult.get("err","")) if vresult else "no status"
-                log("Swap TX failed: "+tx_sig[:20]+" err="+err_msg, "WARN")
+                log("Swap TX failed: "+tx_sig[:20]+" err="+err_msg, "WARN"); log_trade_to_file({"event":"SWAP_FAIL","time":time.strftime("%H:%M:%S"),"router":"Raydium","pair":from_token+"/"+to_token,"side":side,"tx":tx_sig[:20],"error":err_msg})
                 return False, 0.0
         else:
             log("Raydium send failed: "+str(result.get("error",""))[:100], "WARN")
@@ -1204,7 +1206,7 @@ def jupiter_swap(from_token, to_token, amount_input, price, dex=None):
                 except Exception:
                     pass
             if tx_ok:
-                log("SWAP CONFIRMED: "+tx_sig[:20]+"... "+from_token+"→"+to_token+via)
+                log("SWAP CONFIRMED: "+tx_sig[:20]+"... "+from_token+"→"+to_token+via); log_trade_to_file({"event":"SWAP_OK","time":time.strftime("%H:%M:%S"),"router":"Jupiter","pair":from_token+"/"+to_token,"side":side,"tx":tx_sig[:20]})
                 trade = {"time":time.strftime("%H:%M:%S"),"side":"LIVE-"+side+via,
                          "price":price,"amount":out_human,"router":"Jupiter",
                          "chain":"solana","tx":tx_sig[:20]}
@@ -1524,10 +1526,10 @@ def place_order(pair, side, amount):
             if side in ("buy","buy_market"):
                 # amount is token quantity, jupiter_swap needs USDC cost
                 cost = amount * price
-                log(f"place_order BUY: amt={amount} price={price} cost={cost} pair={pair}", "DEBUG")
+                log(f"place_order BUY: amt={amount} price={price} cost={cost} pair={pair}", "DEBUG"); log_trade_to_file({"event":"ORDER_ATTEMPT","time":time.strftime("%H:%M:%S"),"side":"BUY","pair":pair,"amount":amount,"price":price,"cost":cost})
                 result = jupiter_swap(stablecoin, token, cost, price, dex="Raydium")
             else:
-                log(f"place_order SELL: amt={amount} price={price} pair={pair}", "DEBUG")
+                log(f"place_order SELL: amt={amount} price={price} pair={pair}", "DEBUG"); log_trade_to_file({"event":"ORDER_ATTEMPT","time":time.strftime("%H:%M:%S"),"side":"SELL","pair":pair,"amount":amount,"price":price})
                 result = jupiter_swap(token, stablecoin, amount, price, dex="Raydium")
             # jupiter_swap returns (success_bool, amount) tuple — unpack it
             if isinstance(result, tuple):
@@ -1545,6 +1547,14 @@ def place_order(pair, side, amount):
     else:
         return cex_place_order(pair, side, amount)
 
+def log_trade_to_file(entry):
+    """Write a trade event to persistent log file."""
+    try:
+        with open(TRADE_LOG, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
 def record_trade(side, price, amount, pnl=None):
     trade = {"time":time.strftime("%H:%M:%S"),"side":side,"price":price,"amount":amount,"pnl":pnl,"pair":state.get("pair","")}
     with _state_lock:
@@ -1553,6 +1563,8 @@ def record_trade(side, price, amount, pnl=None):
             state["trades"] = state["trades"][-500:]
         state["last_trade"] = {"action": side, "pair": state["pair"], "price": price, "time": time.time()}
         state["trades_list"] = [{"time":t["time"],"action":t["side"],"price":t["price"],"amount":t["amount"],"pnl":t.get("pnl"),"via":t.get("router",""),"pair":t.get("pair", state.get("pair",""))} for t in state["trades"][-50:]]
+    # Persist to file
+    log_trade_to_file({"event":"TRADE","time":trade["time"],"side":side,"pair":trade["pair"],"price":price,"amount":amount,"pnl":pnl})
 
 
 # ── Technical Indicators (stdlib only) ────────────────────────────────────
@@ -3456,6 +3468,14 @@ class Handler(BaseHTTPRequestHandler):
             state["config"] = {k: cfg.get(k) for k in ["risk_pct", "max_pos", "grid_stop_loss_pct", "trailing_pct", "partial_sell_pct", "base_spread", "auto_compound", "dynamic_spread"] if cfg.get(k) is not None}
             log("Config updated: "+json.dumps(data))
             self.respond(200,"application/json",json.dumps({"status":"ok","config":state["config"]}).encode())
+        elif path == "/trade_log":
+            if not self._auth_or_401(): return
+            try:
+                with open(TRADE_LOG) as f:
+                    lines = f.readlines()[-200:]
+                self.respond(200,"application/json",json.dumps({"log":[json.loads(l) for l in lines]}).encode())
+            except Exception as e:
+                self.respond(200,"application/json",json.dumps({"log":[],"error":str(e)}).encode())
         elif path == "/manual_trade":
             if not self._auth_or_401(): return
             pair = data.get("pair", state.get("pair", "SOL/USDC"))
