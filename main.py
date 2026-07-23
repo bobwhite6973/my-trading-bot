@@ -1795,7 +1795,8 @@ def run_grid():
                     log("["+pair+"] Grid re-centered: "+str(grids)+" buy_zone=<="+str(grids[mid_idx]))
             bal = get_balance()
             effective_bal = bal + (state.get("compound_profit", 0) if cfg.get("auto_compound", True) else 0)
-            size = min(effective_bal*cfg["risk_pct"]/100, cfg["max_pos"])/levels
+            min_order = max(5.0, float(cfg.get("min_order_usdc", 5)))  # $5 minimum per grid level
+            size = max(min_order, min(effective_bal*cfg["risk_pct"]/100, cfg["max_pos"])/levels)
             for i,g in enumerate(grids[:-1]):
                 ng = grids[i+1]
                 if g <= price < ng:
