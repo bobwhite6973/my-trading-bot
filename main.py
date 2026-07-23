@@ -135,9 +135,9 @@ cfg = {
     "max_pos":      float(os.environ.get("MAX_POSITION_USD", "500")),
     "max_loss":     float(os.environ.get("MAX_DAILY_LOSS_USD", "200")),
     "source_wallet":os.environ.get("SOURCE_WALLET", ""),
-    # Safety — default to paper trading to avoid accidental live trades
+    # Default to live if wallet is configured, paper otherwise
     "min_arb_spread":  float(os.environ.get("MIN_ARB_SPREAD", "1.5")),
-    "paper_trading":   os.environ.get("PAPER_TRADING", "true").lower() != "false",
+    "paper_trading":   os.environ.get("PAPER_TRADING", "false" if (os.environ.get("SOL_PRIVATE_KEY") or os.environ.get("ETH_PRIVATE_KEY")) else "true").lower() != "false",
     "auto_compound":   os.environ.get("AUTO_COMPOUND", "true").lower() != "false",
     "partial_sell_pct":  max(1, min(99, float(os.environ.get("PARTIAL_SELL_PCT", "50")))),
     "license_key":   os.environ.get("LICENSE_KEY", ""),
