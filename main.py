@@ -3083,7 +3083,7 @@ function refresh() {
 
     // Update config display
     if (d.config) {
-      document.getElementById("cfg-risk").value = d.config.risk_pct || 2;
+      document.getElementById("cfg-risk").value = d.config.risk_pct || "";
       document.getElementById("cfg-maxpos").value = d.config.max_pos || 500;
       document.getElementById("cfg-stoploss").value = d.config.grid_stop_loss_pct || 8;
       document.getElementById("cfg-trailing").value = d.config.trailing_pct || 0.5;
