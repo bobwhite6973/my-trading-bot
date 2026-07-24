@@ -1981,15 +1981,19 @@ def run_grid():
             if state.get("last_midnight",0) < today_midnight:
                 state["daily_pnl"] = 0.0
                 state["last_midnight"] = today_midnight
-            # Track peak balance
-            b = get_balance()
-            if b > state.get("peak_balance", 0):
-                state["peak_balance"] = b
+            # Track peak balance using total portfolio value (USDC + all token holdings)
+            usdc_bal = get_balance()
+            total_val = usdc_bal
+            for gp_name, gp_data in state.get("grid_pairs", {}).items():
+                for idx, pos in gp_data.get("filled", {}).items():
+                    total_val += pos.get("amount", 0) * pos.get("price", 0)
+            if total_val > state.get("peak_balance", 0):
+                state["peak_balance"] = total_val
             # Drawdown check
             dd_pct = cfg.get("max_drawdown_pct", 20)
             pk = state.get("peak_balance", 0)
-            if pk > 0 and b < pk * (1 - dd_pct/100):
-                log("DRAWDOWN STOP: balance $"+str(round(b,2))+" < "+str(round(pk*(1-dd_pct/100),2))+" ("+str(int(dd_pct))+"% drawdown)", "WARN")
+            if pk > 0 and total_val < pk * (1 - dd_pct/100):
+                log("DRAWDOWN STOP: portfolio $"+str(round(total_val,2))+" < "+str(round(pk*(1-dd_pct/100),2))+" ("+str(int(dd_pct))+"% drawdown)", "WARN")
                 state["running"] = False
                 state["strategy"] = None
                 state["emergency_stop"] = True
