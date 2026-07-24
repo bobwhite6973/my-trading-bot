@@ -76,14 +76,18 @@ def validate_license():
     # Try to fetch the keys file
     keys_data = None
     fetch_ok = False
-    try:
-        import urllib.request
-        req = urllib.request.Request(LICENSE_URL, headers={"User-Agent": "LeverBot/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            keys_data = json.loads(resp.read().decode())
-        fetch_ok = True
-    except Exception as e:
-        print(f"License fetch failed: {e}")
+    for attempt in range(3):
+        try:
+            import urllib.request
+            req = urllib.request.Request(LICENSE_URL, headers={"User-Agent": "GridRunner/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                keys_data = json.loads(resp.read().decode())
+            fetch_ok = True
+            break
+        except Exception as e:
+            wait = 2 ** attempt
+            print(f"License fetch attempt {attempt+1} failed: {e} — retrying in {wait}s")
+            time.sleep(wait)
 
     if not fetch_ok or keys_data is None:
         # Grace period: check cache
