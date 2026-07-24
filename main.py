@@ -2982,6 +2982,7 @@ function togglePaper() {
 
 function refresh() {
   apiFetch("/state").then(function(r) { return r.json(); }).then(function(d) {
+    try {
     var on = d.running;
     document.getElementById("dot").className = "dot" + (on ? " on" : "");
     document.getElementById("status-text").textContent = on ? "Running — " + (d.strategy || "").toUpperCase() + " on " + (d.active_pairs ? d.active_pairs.join(", ") : d.pair) + " (" + (d.mode || "").toUpperCase() + ")" : "Stopped";
@@ -3003,8 +3004,8 @@ function refresh() {
         d.grid_trailing_high = gp.trailing_high;
       }
     }
-    document.getElementById("s-balance").textContent = d.balance > 0 ? "$" + d.balance.toFixed(2) : "—";
-    document.getElementById("s-sol-balance").textContent = d.sol_balance > 0 ? "$" + d.sol_balance.toFixed(2) + " (USDC: $" + d.sol_usdc.toFixed(2) + " USDT: $" + d.sol_usdt.toFixed(2) + ")" : "—";
+    document.getElementById("s-balance").textContent = d.balance > 0 ? "$" + (d.balance||0).toFixed(2) : "—";
+    document.getElementById("s-sol-balance").textContent = d.sol_balance > 0 ? "$" + d.sol_balance.toFixed(2) + " (USDC: $" + (d.sol_usdc||0).toFixed(2) + " USDT: $" + (d.sol_usdt||0).toFixed(2) + ")" : "—";
     document.getElementById("s-mode").textContent = d.paper_trading ? "📋 PAPER" : "🔴 LIVE";
     document.getElementById("s-mode").style.color = d.paper_trading ? "var(--yellow)" : "var(--red)";
     var pb = document.getElementById("paper-btn");
@@ -3027,9 +3028,9 @@ function refresh() {
 
     // Update summary cards
     document.getElementById("sm-winrate").textContent = d.win_rate != null ? d.win_rate + "%" : "0%";
-    document.getElementById("sm-avgprofit").textContent = d.avg_profit != null ? "$" + d.avg_profit.toFixed(2) : "$0.00";
+    document.getElementById("sm-avgprofit").textContent = d.avg_profit != null ? "$" + (d.avg_profit||0).toFixed(2) : "$0.00";
     document.getElementById("sm-trades").textContent = d.trades_count != null ? d.trades_count : 0;
-    document.getElementById("sm-best").textContent = d.best_trade != null ? "$" + d.best_trade.toFixed(2) : "—";
+    document.getElementById("sm-best").textContent = d.best_trade != null ? "$" + (d.best_trade||0).toFixed(2) : "—";
 
     // Update trade table
     if (d.trades_list && d.trades_list.length) {
@@ -3149,7 +3150,7 @@ function refresh() {
       document.getElementById("cfg-spread").value = ((d.config.base_spread || 0.05) * 100).toFixed(1);
       document.getElementById("cfg-compound").value = d.config.auto_compound ? "true" : "false";
     }
-  }).catch(console.error);
+  } catch(e) { console.error("refresh error:", e); } }).catch(console.error);
 }
 
 window.addEventListener("resize", function() {
