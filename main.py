@@ -2986,7 +2986,7 @@ function refresh() {
     var on = d.running;
     document.getElementById("dot").className = "dot" + (on ? " on" : "");
     document.getElementById("status-text").textContent = on ? "Running — " + (d.strategy || "").toUpperCase() + " on " + (d.active_pairs ? d.active_pairs.join(", ") : d.pair) + " (" + (d.mode || "").toUpperCase() + ")" : "Stopped";
-    document.getElementById("s-price").textContent = d.price > 0 ? "$" + d.price.toFixed(4) : "—";
+    document.getElementById("s-price").textContent = d.price > 0 ? "$" + (d.price||0).toFixed(4) : "—";
     if (d.price_history && d.price_history.length > 1) {
       // Show grid for currently selected pair
       var viewPair = sel.pair || d.pair || "SOL/USDC";
@@ -3005,7 +3005,7 @@ function refresh() {
       }
     }
     document.getElementById("s-balance").textContent = d.balance > 0 ? "$" + (d.balance||0).toFixed(2) : "—";
-    document.getElementById("s-sol-balance").textContent = d.sol_balance > 0 ? "$" + d.sol_balance.toFixed(2) + " (USDC: $" + (d.sol_usdc||0).toFixed(2) + " USDT: $" + (d.sol_usdt||0).toFixed(2) + ")" : "—";
+    document.getElementById("s-sol-balance").textContent = d.sol_balance > 0 ? "$" + (d.sol_balance||0).toFixed(2) + " (USDC: $" + (d.sol_usdc||0).toFixed(2) + " USDT: $" + (d.sol_usdt||0).toFixed(2) + ")" : "—";
     document.getElementById("s-mode").textContent = d.paper_trading ? "📋 PAPER" : "🔴 LIVE";
     document.getElementById("s-mode").style.color = d.paper_trading ? "var(--yellow)" : "var(--red)";
     var pb = document.getElementById("paper-btn");
