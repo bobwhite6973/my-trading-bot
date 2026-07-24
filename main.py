@@ -1638,10 +1638,12 @@ def place_order(pair, side, amount):
                 # amount is token quantity, jupiter_swap needs USDC cost
                 cost = amount * price
                 log(f"place_order BUY: amt={amount} price={price} cost={cost} pair={pair}", "DEBUG"); log_trade_to_file({"event":"ORDER_ATTEMPT","time":time.strftime("%H:%M:%S"),"side":"BUY","pair":pair,"amount":amount,"price":price,"cost":cost})
-                result = jupiter_swap(stablecoin, token, cost, price, dex="Raydium")
+                swap_dex = "Raydium" if token in ("SOL","BTC","ETH","USDC","USDT","JUP","BONK","WIF") else None
+                result = jupiter_swap(stablecoin, token, cost, price, dex=swap_dex)
             else:
                 log(f"place_order SELL: amt={amount} price={price} pair={pair}", "DEBUG"); log_trade_to_file({"event":"ORDER_ATTEMPT","time":time.strftime("%H:%M:%S"),"side":"SELL","pair":pair,"amount":amount,"price":price})
-                result = jupiter_swap(token, stablecoin, amount, price, dex="Raydium")
+                swap_dex = "Raydium" if token in ("SOL","BTC","ETH","USDC","USDT","JUP","BONK","WIF") else None
+                result = jupiter_swap(token, stablecoin, amount, price, dex=swap_dex)
             # jupiter_swap returns (success_bool, amount) tuple — unpack it
             if isinstance(result, tuple):
                 return result[0]
