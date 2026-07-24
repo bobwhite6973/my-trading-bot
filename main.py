@@ -51,8 +51,13 @@ def validate_license():
             if os.path.exists(trial_file):
                 with open(trial_file) as f:
                     trial = json.load(f)
-                trial_start = datetime.fromisoformat(trial["start"])
+                trial_start = datetime.fromisoformat(trial.get("start", "2000-01-01T00:00:00+00:00"))
                 trial_end = trial_start + timedelta(days=7)
+                # Verify hash hasn't been tampered with
+                expected_hash = hashlib.sha256(trial_start.isoformat().encode()).hexdigest()[:16]
+                if trial.get("hash") != expected_hash:
+                    print("TRIAL DATA TAMPERED — forcing paper-only mode")
+                    return False, {"valid": False, "type": "tampered", "expires": None, "days_remaining": 0, "error": "Trial data tampered. Purchase a license."}
                 now = datetime.now(timezone.utc)
                 days_left = (trial_end - now).days
                 if now < trial_end:
@@ -62,11 +67,21 @@ def validate_license():
                     print(f"TRIAL EXPIRED — ended {trial_end.strftime('%Y-%m-%d')}. Buy a license to continue live trading.")
                     return False, {"valid": False, "type": "trial_expired", "expires": trial_end.isoformat(), "days_remaining": 0, "error": "Trial expired. Purchase a license key to continue."}
             else:
-                # First run — start trial
+                # First run — start trial. Fetch remote time to prevent clock manipulation.
                 trial_start = datetime.now(timezone.utc)
+                try:
+                    r = requests.get("https://api.kraken.com/0/public/Time", timeout=5)
+                    if r.status_code == 200:
+                        unixtime = r.json().get("result",{}).get("unixtime", 0)
+                        if unixtime > 0:
+                            trial_start = datetime.fromtimestamp(unixtime, tz=timezone.utc)
+                except Exception:
+                    pass  # fall back to local time if network fails
                 trial_end = trial_start + timedelta(days=7)
+                # Store obfuscated: hash the start time so tampering is detectable
+                trial_hash = hashlib.sha256(trial_start.isoformat().encode()).hexdigest()[:16]
                 with open(trial_file, "w") as f:
-                    json.dump({"start": trial_start.isoformat(), "end": trial_end.isoformat()}, f)
+                    json.dump({"start": trial_start.isoformat(), "end": trial_end.isoformat(), "hash": trial_hash}, f)
                 print(f"TRIAL STARTED — 7 days free. Expires {trial_end.strftime('%Y-%m-%d')}")
                 return True, {"valid": True, "type": "trial", "expires": trial_end.isoformat(), "days_remaining": 7}
         except Exception as e:
