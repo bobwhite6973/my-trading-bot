@@ -2277,7 +2277,7 @@ DASHBOARD = '''<!DOCTYPE html>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <meta name="apple-mobile-web-app-title" content="GridRunner"/>
-<link rel="apple-touch-icon" href="/manifest.json"/>
+<link rel="apple-touch-icon" href="/logo.jpeg"/>
 <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 :root{--bg:#080808;--card:#111;--border:#1a1a1a;--text:#eee;--text2:#888;--dim:#444;--accent:#00ff9d;--red:#ff6b6b;--blue:#4dabf7;--purple:#cc99ff;--yellow:#ffd43b}
@@ -3196,6 +3196,23 @@ class Handler(BaseHTTPRequestHandler):
 
         if path=="/":
             self.respond(200,"text/html",DASHBOARD.replace("{API_SECRET}", os.environ.get("API_SECRET","")).encode())
+        elif path=="/logo.jpeg":
+            try:
+                with open("logo.jpeg","rb") as f: logo_data=f.read()
+                self.respond(200,"image/jpeg",logo_data)
+            except: self.respond(404,"text/plain",b"logo not found")
+        elif path=="/manifest.json":
+            manifest = json.dumps({
+                "name":"GridRunner","short_name":"GridRunner","start_url":"/","display":"standalone",
+                "background_color":"#0a0a1a","theme_color":"#0a0a1a",
+                "icons":[{"src":"/logo.jpeg","sizes":"512x512","type":"image/jpeg","purpose":"any maskable"}]
+            })
+            self.respond(200,"application/json",manifest.encode())
+        elif path=="/sw.js":
+            self.respond(200,"application/javascript",
+                b"self.addEventListener('install',function(e){self.skipWaiting()});"
+                b"self.addEventListener('activate',function(e){e.waitUntil(clients.claim())});"
+                b"self.addEventListener('fetch',function(e){e.respondWith(fetch(e.request).catch(function(){return caches.match(e.request)}))})")
         elif path=="/state":
             state["trades_list"] = [{"time":t["time"],"action":t["side"],"price":t["price"],"amount":t["amount"],"pnl":t.get("pnl"),"via":t.get("router",""),"pair":t.get("pair", state.get("pair",""))} for t in state["trades"][-50:]]
             state["positions_count"] = len(state.get("positions", []))
